@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "AI AutoChat — Brand Visibility",
+  "version": "0.4.0",
+  "description": "按预设问题访问各 AI 站点，采集回复与引用并保存到本地（Gemini、ChatGPT、Perplexity、Google AI Overview / AI Mode 等）。",
+  "permissions": ["storage", "tabs", "downloads", "scripting", "webNavigation"],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://www.perplexity.ai/*",
+    "https://perplexity.ai/*",
+    "https://www.google.com/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AI AutoChat"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": ["content/gemini.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content/chatgpt.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://www.perplexity.ai/*", "https://perplexity.ai/*"],
+      "js": ["content/perplexity.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://www.google.com/search*"],
+      "js": ["content/google-search.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

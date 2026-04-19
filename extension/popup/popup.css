@@ -1,0 +1,234 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  background: #fafafa;
+}
+
+.wrap {
+  width: 360px;
+  padding: 14px 16px 16px;
+}
+
+.title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: #555;
+  line-height: 1.45;
+}
+
+textarea {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  resize: vertical;
+  min-height: 160px;
+  font: inherit;
+  line-height: 1.45;
+}
+
+textarea:focus {
+  outline: 2px solid #1a73e8;
+  outline-offset: 1px;
+  border-color: #1a73e8;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+button {
+  font: inherit;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+button.primary {
+  flex: 1;
+  background: #1a73e8;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #1557b0;
+}
+
+button.primary.chatgpt {
+  background: #10a37f;
+}
+
+button.primary.chatgpt:hover {
+  background: #0d8a6a;
+}
+
+button.primary.perplexity {
+  background: #20808d;
+}
+
+button.primary.perplexity:hover {
+  background: #1a6b76;
+}
+
+button.primary.google-aio {
+  background: #4285f4;
+}
+
+button.primary.google-aio:hover {
+  background: #3367d6;
+}
+
+button.primary.google-aimode {
+  background: #174ea6;
+}
+
+button.primary.google-aimode:hover {
+  background: #143e85;
+}
+
+button.primary.full {
+  flex: 1;
+  width: 100%;
+}
+
+button.ghost {
+  background: #fff;
+  border-color: #ccc;
+  color: #333;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 10px 0 0;
+  min-height: 1.2em;
+  font-size: 12px;
+  color: #444;
+}
+
+.status.error {
+  color: #b3261e;
+}
+
+.export-block {
+  margin-top: 12px;
+  padding: 10px 0 0;
+  border-top: 1px solid #e8e8e8;
+}
+
+.export-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 8px;
+}
+
+.export-format {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.export-label {
+  color: #555;
+  margin-right: 4px;
+}
+
+.export-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #333;
+}
+
+.export-opt input {
+  margin: 0;
+}
+
+button.export-btn {
+  width: 100%;
+  justify-content: center;
+}
+
+.last-run-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.4;
+  min-height: 1.2em;
+}
+
+.debug {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.debug-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+}
+
+.debug-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+button.mini {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #ccc;
+  color: #333;
+}
+
+button.mini:hover {
+  background: #f3f3f3;
+}
+
+.log-view {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  resize: vertical;
+  min-height: 96px;
+  max-height: 200px;
+  color: #222;
+}
