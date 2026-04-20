@@ -1,4 +1,12 @@
 import { appendLog, clearLogs, getLogs } from "../lib/logger.js";
+import {
+  buildWorkflowExportJson,
+  difyRunWorkflowBlocking,
+  difyRunWorkflowBlockingWithTypeRetry,
+  difyUploadFile,
+  normalizeDifyApiBase,
+  normalizeWorkflowImportJson,
+} from "../lib/dify-workflow.js";
 import * as XLSX from "../vendor/xlsx.mjs";
 
 const GEMINI_ORIGIN = "https://gemini.google.com";
@@ -114,13 +122,12 @@ async function runGeminiQueue(questions) {
     tab = await ensureGeminiTab();
   } catch (e) {
     await trace("error", "background", "ensureGeminiTab 失败", String(e));
-    await exportLastErrorReport({ phase: "ensureGeminiTab", error: String(e) });
+    await recordRunError({ phase: "ensureGeminiTab", error: String(e) });
     return { ok: false, error: String(e) };
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabComplete(tab.id);
-  await sleep(1200);
+  await waitTabSettled(tab.id, 1400);
 
   try {
     await chrome.scripting.executeScript({
@@ -161,7 +168,7 @@ async function runGeminiQueue(questions) {
         error: res?.error || "无 error 字段",
         raw: res,
       });
-      await exportLastErrorReport({
+      await recordRunError({
         phase: "GEMINI_RUN_QUESTION",
         step: `${i + 1}/${filtered.length}`,
         tabId: tab.id,
@@ -194,7 +201,7 @@ async function runGeminiQueue(questions) {
     await saveRunToStorage(results, "gemini");
   } catch (e) {
     await trace("error", "background", "保存或下载失败", String(e));
-    await exportLastErrorReport({
+    await recordRunError({
       phase: "save_or_export",
       tabId: tab.id,
       tabUrl: tab.url || "",
@@ -228,13 +235,12 @@ async function runChatGPTQueue(questions) {
     tab = await ensureChatGPTTab();
   } catch (e) {
     await trace("error", "background", "ensureChatGPTTab 失败", String(e));
-    await exportLastErrorReport({ phase: "ensureChatGPTTab", error: String(e) });
+    await recordRunError({ phase: "ensureChatGPTTab", error: String(e) });
     return { ok: false, error: String(e) };
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabComplete(tab.id);
-  await sleep(1200);
+  await waitTabSettled(tab.id, 1600);
 
   try {
     await chrome.scripting.executeScript({
@@ -273,7 +279,7 @@ async function runChatGPTQueue(questions) {
         error: res?.error || "无 error 字段",
         raw: res,
       });
-      await exportLastErrorReport({
+      await recordRunError({
         phase: "CHATGPT_RUN_QUESTION",
         step: `${i + 1}/${filtered.length}`,
         tabId: tab.id,
@@ -306,7 +312,7 @@ async function runChatGPTQueue(questions) {
     await saveRunToStorage(results, "chatgpt");
   } catch (e) {
     await trace("error", "background", "保存或下载失败", String(e));
-    await exportLastErrorReport({
+    await recordRunError({
       phase: "save_or_export_chatgpt",
       tabId: tab.id,
       tabUrl: tab.url || "",
@@ -340,13 +346,12 @@ async function runPerplexityQueue(questions) {
     tab = await ensurePerplexityTab();
   } catch (e) {
     await trace("error", "background", "ensurePerplexityTab 失败", String(e));
-    await exportLastErrorReport({ phase: "ensurePerplexityTab", error: String(e) });
+    await recordRunError({ phase: "ensurePerplexityTab", error: String(e) });
     return { ok: false, error: String(e) };
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabComplete(tab.id);
-  await sleep(400);
+  await waitTabSettled(tab.id, 900);
 
   const results = [];
   for (let i = 0; i < filtered.length; i++) {
@@ -376,7 +381,7 @@ async function runPerplexityQueue(questions) {
         error: res?.error || "无 error 字段",
         raw: res,
       });
-      await exportLastErrorReport({
+      await recordRunError({
         phase: "PERPLEXITY_RUN_QUESTION",
         step: `${i + 1}/${filtered.length}`,
         tabId: tab.id,
@@ -409,7 +414,7 @@ async function runPerplexityQueue(questions) {
     await saveRunToStorage(results, "perplexity");
   } catch (e) {
     await trace("error", "background", "保存或下载失败", String(e));
-    await exportLastErrorReport({
+    await recordRunError({
       phase: "save_or_export_perplexity",
       tabId: tab.id,
       tabUrl: tab.url || "",
@@ -446,11 +451,12 @@ async function runGoogleSearchQueue(questions, mode) {
     tab = await ensureGoogleTab();
   } catch (e) {
     await trace("error", "background", "ensureGoogleTab 失败", String(e));
-    await exportLastErrorReport({ phase: "ensureGoogleTab", error: String(e) });
+    await recordRunError({ phase: "ensureGoogleTab", error: String(e) });
     return { ok: false, error: String(e) };
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
+  await waitTabSettled(tab.id, 600);
 
   const results = [];
   for (let i = 0; i < filtered.length; i++) {
@@ -462,14 +468,18 @@ async function runGoogleSearchQueue(questions, mode) {
 
     await chrome.tabs.update(tab.id, { url });
     await waitTabComplete(tab.id);
-    await sleep(3400);
+    await waitUntilTabUrlMatches(tab.id, (u) => {
+      const s = u || "";
+      return /\.google\./.test(s) && /\/search\?/.test(s);
+    });
+    await sleep(4500);
 
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         files: [GOOGLE_SEARCH_CS_FILE],
       });
-      await sleep(600);
+      await sleep(750);
     } catch (e) {
       await trace("warn", "background", "Google executeScript", String(e));
     }
@@ -494,7 +504,7 @@ async function runGoogleSearchQueue(questions, mode) {
         error: res?.error || "无 error 字段",
         raw: res,
       });
-      await exportLastErrorReport({
+      await recordRunError({
         phase: "GOOGLE_SEARCH_RUN",
         step: `${i + 1}/${filtered.length}`,
         tabId: tab.id,
@@ -529,7 +539,7 @@ async function runGoogleSearchQueue(questions, mode) {
     await saveRunToStorage(results, site);
   } catch (e) {
     await trace("error", "background", "Google 保存失败", String(e));
-    await exportLastErrorReport({
+    await recordRunError({
       phase: "save_google_search",
       tabId: tab.id,
       tabUrl: tab.url || "",
@@ -615,6 +625,44 @@ function waitTabComplete(tabId) {
       }
     });
   });
+}
+
+/**
+ * 导航后 URL 可能晚于 status=complete 才更新；轮询避免过早注入/发消息。
+ * @param {number} tabId
+ * @param {(url: string) => boolean} predicate
+ */
+async function waitUntilTabUrlMatches(tabId, predicate, timeoutMs = 25000, intervalMs = 180) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      const u = t.url || "";
+      if (predicate(u)) {
+        await sleep(450);
+        return true;
+      }
+    } catch (_) {
+      /* tab 可能短暂不可用 */
+    }
+    await sleep(intervalMs);
+  }
+  await trace("warn", "background", "waitUntilTabUrlMatches 超时", { tabId });
+  return false;
+}
+
+/**
+ * 标签 complete 后再多等一会，减少 SPA 未水合时采到错 DOM。
+ * @param {number} tabId
+ * @param {number} extraMs
+ */
+async function waitTabSettled(tabId, extraMs = 900) {
+  await waitTabComplete(tabId);
+  await sleep(extraMs);
+  try {
+    const t = await chrome.tabs.get(tabId);
+    if (t.status !== "complete") await waitTabComplete(tabId);
+  } catch (_) {}
 }
 
 /**
@@ -770,31 +818,35 @@ async function sendToTabWithRetry(tabId, message, csFile = GEMINI_CS_FILE, opts 
 }
 
 /**
+ * 记录失败（写入调试日志 + storage），不自动下载文件，避免每次失败都弹出下载。
+ * 完整排查请用弹窗「调试日志 → 导出 JSON」。
  * @param {Record<string, unknown>} context
  */
-async function exportLastErrorReport(context) {
+async function recordRunError(context) {
+  const at = new Date().toISOString();
   try {
-    const logs = await getLogs();
-    const manifest = chrome.runtime.getManifest();
-    const text = JSON.stringify(
-      {
-        exportedAt: new Date().toISOString(),
-        extensionVersion: manifest.version,
-        hint: "将本文件放到项目目录后，AI 助手可直接读取；无法从浏览器自动同步到 Cursor。",
-        ...context,
-        logs,
-      },
-      null,
-      2
-    );
-    const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(text)}`;
-    await chrome.downloads.download({
-      url: dataUrl,
-      filename: "ai-autochat-last-error.json",
-      saveAs: false,
+    await appendLog({
+      t: at,
+      level: "error",
+      source: "background",
+      message: `run_error:${String(context.phase ?? "unknown")}`,
+      detail: JSON.stringify(context),
     });
-  } catch (e) {
-    console.error("[AI-AutoChat] exportLastErrorReport", e);
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    await chrome.storage.local.set({
+      lastRunError: {
+        at,
+        phase: String(context.phase ?? ""),
+        error: String(context.error ?? ""),
+        ...(context.step != null ? { step: String(context.step) } : {}),
+        ...(context.tabUrl != null ? { tabUrl: String(context.tabUrl) } : {}),
+      },
+    });
+  } catch (_) {
+    /* ignore */
   }
 }
 
@@ -822,7 +874,9 @@ async function saveRunToStorage(results, site) {
       completedAt: at,
       results,
     },
+    lastRunError: null,
   });
+  await maybeAnalyzeWithDify(results, site);
 }
 
 /**
@@ -837,6 +891,267 @@ function uint8ArrayToBase64DataUrl(bytes, mime) {
   }
   const b64 = btoa(binary);
   return `data:${mime};base64,${b64}`;
+}
+
+/**
+ * @param {string} csvText
+ * @param {string} [filenameBase]
+ */
+async function downloadCsvText(csvText, filenameBase = "Brand_Visibility_Report") {
+  let s = String(csvText || "");
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
+  const text = `\uFEFF${s}`;
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  let url;
+  if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    url = URL.createObjectURL(blob);
+  } else {
+    const enc = new TextEncoder().encode(text);
+    url = uint8ArrayToBase64DataUrl(enc, "text/csv;charset=utf-8");
+  }
+  try {
+    await chrome.downloads.download({
+      url,
+      filename: `${filenameBase}-${Date.now()}.csv`,
+      saveAs: false,
+    });
+  } finally {
+    if (url.startsWith("blob:") && typeof URL !== "undefined" && URL.revokeObjectURL) {
+      URL.revokeObjectURL(url);
+    }
+  }
+}
+
+/**
+ * 上传规范化后的 JSON 并执行工作流，下载 CSV；写入 lastDifyRun。
+ * @param {Record<string, unknown>} cfg storage：difyBaseUrl, difyApiKey, difyApiUser
+ * @param {object} payloadObject 含 results，供工作流解析
+ * @param {string} targetBrands
+ * @param {string} uploadBaseName 上传文件名前缀
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uploadBaseName) {
+  const apiBase = normalizeDifyApiBase(cfg.difyBaseUrl || "");
+  const apiKey = String(cfg.difyApiKey || "").trim();
+  const userId =
+    String(cfg.difyApiUser || "ai-autochat-extension").trim() || "ai-autochat-extension";
+  const brands = String(targetBrands || "").trim();
+
+  if (!apiBase || !apiKey || !brands) {
+    const err = "Dify 配置不完整：请填写 API 根地址、API Key 与目标品牌";
+    await trace("warn", "background", "Dify", err);
+    await chrome.storage.local.set({
+      lastDifyRun: {
+        ok: false,
+        at: new Date().toISOString(),
+        error: err,
+      },
+    });
+    return { ok: false, error: err };
+  }
+
+  try {
+    const jsonStr = JSON.stringify(payloadObject, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const fname = `${uploadBaseName}-${Date.now()}.json`;
+
+    await trace("info", "background", "Dify：上传 JSON 并执行工作流", {
+      apiBase,
+      userId,
+      filename: fname,
+    });
+
+    const fileId = await difyUploadFile(apiBase, apiKey, userId, blob, fname);
+    let csv;
+    try {
+      csv = await difyRunWorkflowBlocking(
+        apiBase,
+        apiKey,
+        userId,
+        fileId,
+        brands,
+        "document"
+      );
+    } catch (firstErr) {
+      await trace("warn", "background", "Dify：以 document 执行失败，改用 custom 重试", String(firstErr));
+      csv = await difyRunWorkflowBlocking(
+        apiBase,
+        apiKey,
+        userId,
+        fileId,
+        brands,
+        "custom"
+      );
+    }
+
+    await downloadCsvText(csv, "Brand_Visibility_Report");
+    await chrome.storage.local.set({
+      lastDifyRun: {
+        ok: true,
+        at: new Date().toISOString(),
+        message: "已从 Dify 工作流下载 Brand_Visibility_Report CSV",
+      },
+    });
+    await trace("info", "background", "Dify：工作流完成并已下载 CSV", {});
+    return { ok: true };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    await trace("error", "background", "Dify 工作流失败", msg);
+    await chrome.storage.local.set({
+      lastDifyRun: {
+        ok: false,
+        at: new Date().toISOString(),
+        error: msg,
+      },
+    });
+    return { ok: false, error: msg };
+  }
+}
+
+/** 防止并发执行「JSON → Dify」任务 */
+let difyJsonJobBusy = false;
+
+/**
+ * 在后台完整执行 JSON→Dify→CSV（阻塞模式，无 SSE / 节点追踪）。
+ * @param {{ jsonText?: string, targetBrands?: string }} msg
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+async function runDifyJsonJob(msg) {
+  const jsonText = typeof msg.jsonText === "string" ? msg.jsonText : "";
+  const targetBrands = typeof msg.targetBrands === "string" ? msg.targetBrands : "";
+
+  if (difyJsonJobBusy) {
+    return { ok: false, error: "已有 Dify 任务在执行，请稍候" };
+  }
+  difyJsonJobBusy = true;
+
+  try {
+    await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
+
+    const cfg = await chrome.storage.local.get([
+      "difyBaseUrl",
+      "difyApiKey",
+      "difyApiUser",
+      "difyTargetBrands",
+    ]);
+    const apiBase = normalizeDifyApiBase(cfg.difyBaseUrl || "");
+    const apiKey = String(cfg.difyApiKey || "").trim();
+    const userId =
+      String(cfg.difyApiUser || "ai-autochat-extension").trim() || "ai-autochat-extension";
+    const brands = String(targetBrands || cfg.difyTargetBrands || "").trim();
+
+    if (!apiBase || !apiKey || !brands) {
+      const err =
+        "Dify 配置不完整：请在「设置」中填写 API 根地址、API Key，在「运行」中填写 target_brands";
+      await chrome.storage.local.set({
+        lastDifyRun: { ok: false, at: new Date().toISOString(), error: err },
+      });
+      return { ok: false, error: err };
+    }
+
+    let payload;
+    try {
+      payload = normalizeWorkflowImportJson(JSON.parse(jsonText));
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await trace("error", "background", "Dify JSON 解析", err);
+      await chrome.storage.local.set({
+        lastDifyRun: { ok: false, at: new Date().toISOString(), error: err },
+      });
+      return { ok: false, error: err };
+    }
+
+    const jsonStr = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const fname = `ai-autochat-import-${Date.now()}.json`;
+
+    await trace("info", "background", "Dify：上传并阻塞执行工作流", {
+      apiBase,
+      userId,
+      filename: fname,
+    });
+
+    const fileId = await difyUploadFile(apiBase, apiKey, userId, blob, fname);
+
+    const csv = await difyRunWorkflowBlockingWithTypeRetry(
+      apiBase,
+      apiKey,
+      userId,
+      fileId,
+      brands
+    );
+
+    await downloadCsvText(csv, "Brand_Visibility_Report");
+    await chrome.storage.local.set({
+      lastDifyRun: {
+        ok: true,
+        at: new Date().toISOString(),
+        message: "已从 Dify 工作流下载 Brand_Visibility_Report CSV",
+      },
+    });
+    await trace("info", "background", "Dify：工作流完成并已下载 CSV", {});
+    return { ok: true };
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    await trace("error", "background", "Dify 工作流失败", errMsg);
+    await chrome.storage.local.set({
+      lastDifyRun: {
+        ok: false,
+        at: new Date().toISOString(),
+        error: errMsg,
+      },
+    });
+    return { ok: false, error: errMsg };
+  } finally {
+    difyJsonJobBusy = false;
+    try {
+      await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function maybeAnalyzeWithDify(results, site) {
+  let cfg;
+  try {
+    cfg = await chrome.storage.local.get([
+      "difyWorkflowEnabled",
+      "difyBaseUrl",
+      "difyApiKey",
+      "difyApiUser",
+      "difyTargetBrands",
+    ]);
+  } catch {
+    return;
+  }
+
+  if (!cfg.difyWorkflowEnabled) {
+    try {
+      await chrome.storage.local.remove("lastDifyRun");
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  const targetBrands = String(cfg.difyTargetBrands || "").trim();
+  const payload = buildWorkflowExportJson(results, site);
+  try {
+    await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
+    await runDifyWorkflowWithPayload(
+      cfg,
+      payload,
+      targetBrands,
+      `ai-autochat-${site || "run"}`
+    );
+  } finally {
+    try {
+      await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**
@@ -893,6 +1208,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     clearLogs()
       .then(() => sendResponse({ ok: true }))
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (msg?.type === "START_DIFY_JSON") {
+    const jsonText = typeof msg.jsonText === "string" ? msg.jsonText : "";
+    const targetBrands = typeof msg.targetBrands === "string" ? msg.targetBrands : "";
+    runDifyJsonJob({ jsonText, targetBrands })
+      .then((result) => {
+        try {
+          sendResponse(result);
+        } catch {
+          /* 弹窗已关闭等 */
+        }
+      })
+      .catch((e) => {
+        void trace("error", "background", "runDifyJsonJob 未捕获", String(e));
+        try {
+          sendResponse({
+            ok: false,
+            error: String(e instanceof Error ? e.message : e),
+          });
+        } catch {
+          /* ignore */
+        }
+      });
     return true;
   }
 
@@ -980,7 +1320,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch(async (err) => {
         await trace("error", "background", "runGeminiQueue 异常", String(err));
-        await exportLastErrorReport({
+        await recordRunError({
           phase: "runGeminiQueue_uncaught",
           error: String(err?.message || err),
         });
@@ -995,7 +1335,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch(async (err) => {
         await trace("error", "background", "runChatGPTQueue 异常", String(err));
-        await exportLastErrorReport({
+        await recordRunError({
           phase: "runChatGPTQueue_uncaught",
           error: String(err?.message || err),
         });
@@ -1010,7 +1350,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch(async (err) => {
         await trace("error", "background", "runPerplexityQueue 异常", String(err));
-        await exportLastErrorReport({
+        await recordRunError({
           phase: "runPerplexityQueue_uncaught",
           error: String(err?.message || err),
         });
@@ -1025,7 +1365,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch(async (err) => {
         await trace("error", "background", "runGoogleSearchQueue aio 异常", String(err));
-        await exportLastErrorReport({
+        await recordRunError({
           phase: "runGoogleSearchQueue_aio_uncaught",
           error: String(err?.message || err),
         });
@@ -1040,7 +1380,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(sendResponse)
       .catch(async (err) => {
         await trace("error", "background", "runGoogleSearchQueue aimode 异常", String(err));
-        await exportLastErrorReport({
+        await recordRunError({
           phase: "runGoogleSearchQueue_aimode_uncaught",
           error: String(err?.message || err),
         });

@@ -230,10 +230,23 @@
   /**
    * @param {{ question: string, newChat: boolean }} opts
    */
+  async function waitForPageReady() {
+    if (document.readyState !== "complete") {
+      await new Promise((r) => {
+        if (document.readyState === "complete") r();
+        else window.addEventListener("load", () => r(), { once: true });
+      });
+    }
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await sleep(500);
+  }
+
   async function runOneQuestion(opts) {
     trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
 
     if (!isPerplexityPage()) throw new Error("不在 Perplexity 页面");
+
+    await waitForPageReady();
 
     trace("info", "查找输入框");
     const editor = await waitFor(() => findPromptEditor(), 28000, 200);

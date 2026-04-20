@@ -604,11 +604,24 @@
   /**
    * @param {{ question: string, mode: "aio"|"aimode", index?: number }} opts
    */
+  async function waitForPageReady() {
+    if (document.readyState !== "complete") {
+      await new Promise((r) => {
+        if (document.readyState === "complete") r();
+        else window.addEventListener("load", () => r(), { once: true });
+      });
+    }
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await sleep(450);
+  }
+
   async function runOneQuestion(opts) {
     const mode = opts.mode === "aimode" ? "aimode" : "aio";
     trace("info", "runOneQuestion", { mode, url: location.href });
 
     if (!isGoogleSearchPage()) throw new Error("不在 Google 搜索页");
+
+    await waitForPageReady();
 
     if (mode === "aio") {
       let root = await waitForElement(() => findAiOverviewRoot(), 55000, 400);

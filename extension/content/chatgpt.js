@@ -108,7 +108,7 @@
       aria: el.getAttribute("aria-label"),
     });
     el.click();
-    await sleep(1000);
+    await sleep(1500);
   }
 
   /**
@@ -252,6 +252,17 @@
    * 将最后一条助手消息滚入视口，避免虚拟列表/懒渲染导致 innerText 偏短。
    * @param {HTMLElement | null} assistantRoot
    */
+  async function waitForPageReady() {
+    if (document.readyState !== "complete") {
+      await new Promise((r) => {
+        if (document.readyState === "complete") r();
+        else window.addEventListener("load", () => r(), { once: true });
+      });
+    }
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await sleep(500);
+  }
+
   function scrollAssistantIntoView(assistantRoot) {
     if (!assistantRoot) return;
     try {
@@ -400,6 +411,8 @@
     trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
 
     if (!isChatGPTPage()) throw new Error("不在 ChatGPT 页面");
+
+    await waitForPageReady();
 
     if (opts.newChat) {
       await startNewChat();

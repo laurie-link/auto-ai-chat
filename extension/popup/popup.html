@@ -8,64 +8,105 @@
   </head>
   <body>
     <main class="wrap">
-      <h1 class="title">AI AutoChat</h1>
-      <p class="hint">
-        每行一个问题，将依次新开对话并发送（需已登录对应站点）。Google AI Overview
-        不一定对每个查询都出现，未命中时结果中 answer 为空并带说明。AI Mode 需账号已开通 Labs
-        等条件，且 URL 参数可能随地区变化。运行结束后结果保存在扩展内，请在下方的「下载上次运行结果」手动导出。失败时会在「下载」生成
-        <strong>ai-autochat-last-error.json</strong>。若出现 Receiving end，可先刷新对应标签页再试。
-      </p>
-      <textarea
-        id="questions"
-        rows="10"
-        placeholder="例如：&#10;某品牌在你所知的范围内口碑如何？&#10;列出三家竞品并对比。"
-        spellcheck="false"
-      ></textarea>
-      <div class="row">
-        <button id="runGemini" type="button" class="primary full">在 Gemini 中运行</button>
-      </div>
-      <div class="row">
-        <button id="runChatgpt" type="button" class="primary chatgpt full">在 ChatGPT 中运行</button>
-      </div>
-      <div class="row">
-        <button id="runPerplexity" type="button" class="primary perplexity full">在 Perplexity 中运行</button>
-      </div>
-      <div class="row">
-        <button id="runGoogleAio" type="button" class="primary google-aio full">在 Google（AI Overview）中运行</button>
-      </div>
-      <div class="row">
-        <button id="runGoogleAimode" type="button" class="primary google-aimode full">在 Google AI Mode 中运行</button>
-      </div>
-      <p id="status" class="status" role="status"></p>
+      <header class="topbar">
+        <h1 class="title">AI AutoChat</h1>
+        <nav class="tabs" role="tablist" aria-label="主标签">
+          <button type="button" class="tab active" data-tab="run" id="tabRun" role="tab" aria-selected="true">
+            运行
+          </button>
+          <button type="button" class="tab" data-tab="settings" id="tabSettings" role="tab" aria-selected="false">
+            设置
+          </button>
+        </nav>
+      </header>
 
-      <section class="export-block" aria-label="导出上次运行">
-        <div class="export-head">导出上次运行</div>
-        <div class="export-format">
-          <span class="export-label">格式</span>
-          <label class="export-opt"
-            ><input type="radio" name="exportFormat" value="json" checked /> JSON</label
-          >
-          <label class="export-opt"
-            ><input type="radio" name="exportFormat" value="xlsx" /> Excel（.xlsx）</label
-          >
+      <p id="status" class="status global-status" role="status"></p>
+
+      <div id="panelRun" class="tab-panel" role="tabpanel" aria-labelledby="tabRun">
+        <textarea
+          id="questions"
+          rows="9"
+          placeholder="每行一个问题"
+          spellcheck="false"
+        ></textarea>
+        <div class="row">
+          <button id="runGemini" type="button" class="primary full">Gemini</button>
         </div>
-        <button id="downloadLastRun" type="button" class="ghost export-btn" disabled>
-          下载上次运行结果
-        </button>
-        <p id="lastRunHint" class="last-run-hint"></p>
-      </section>
+        <div class="row">
+          <button id="runChatgpt" type="button" class="primary chatgpt full">ChatGPT</button>
+        </div>
+        <div class="row">
+          <button id="runPerplexity" type="button" class="primary perplexity full">Perplexity</button>
+        </div>
+        <div class="row">
+          <button id="runGoogleAio" type="button" class="primary google-aio full">Google AI Overview</button>
+        </div>
+        <div class="row">
+          <button id="runGoogleAimode" type="button" class="primary google-aimode full">Google AI Mode</button>
+        </div>
 
-      <section class="debug" aria-label="调试日志">
-        <div class="debug-head">
-          <span class="debug-title">调试日志</span>
-          <div class="debug-actions">
-            <button id="logRefresh" type="button" class="mini">刷新</button>
-            <button id="logClear" type="button" class="mini">清空</button>
-            <button id="logExport" type="button" class="mini">导出 JSON</button>
+        <section class="dify-run-panel" aria-label="Dify">
+          <label class="run-check">
+            <input type="checkbox" id="difyWorkflowEnabled" />
+            采集完成后自动跑 Dify 并下载 CSV
+          </label>
+          <label class="run-field">
+            <span class="run-label">target_brands</span>
+            <input type="text" id="difyTargetBrands" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="run-field">
+            <span class="run-label">JSON</span>
+            <input type="file" id="difyJsonFile" accept=".json,application/json" />
+          </label>
+          <button type="button" id="runDifyFromFile" class="run-dify-btn">JSON → Dify → CSV</button>
+          <p id="difyLastHint" class="run-hint" role="status"></p>
+        </section>
+
+        <section class="export-block" aria-label="导出">
+          <div class="export-row">
+            <label class="export-opt"
+              ><input type="radio" name="exportFormat" value="json" checked /> JSON</label
+            >
+            <label class="export-opt"
+              ><input type="radio" name="exportFormat" value="xlsx" /> xlsx</label
+            >
+            <button id="downloadLastRun" type="button" class="ghost export-btn-inline" disabled>
+              下载上次结果
+            </button>
           </div>
-        </div>
-        <textarea id="logView" class="log-view" readonly rows="6" spellcheck="false"></textarea>
-      </section>
+          <p id="lastRunHint" class="last-run-hint"></p>
+          <p id="lastErrorHint" class="last-run-hint error-hint" hidden></p>
+        </section>
+      </div>
+
+      <div id="panelSettings" class="tab-panel" role="tabpanel" aria-labelledby="tabSettings" hidden>
+        <section class="settings-block" aria-label="API">
+          <label class="settings-field">
+            <span class="settings-label">API 根地址</span>
+            <input type="text" id="difyBaseUrl" placeholder="http://…" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="settings-field">
+            <span class="settings-label">API Key</span>
+            <input type="password" id="difyApiKey" placeholder="" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="settings-field">
+            <span class="settings-label">API user</span>
+            <input type="text" id="difyApiUser" spellcheck="false" autocomplete="off" />
+          </label>
+        </section>
+
+        <section class="debug" aria-label="调试日志">
+          <div class="debug-head">
+            <span class="debug-title">日志</span>
+            <div class="debug-actions">
+              <button id="logRefresh" type="button" class="mini">刷新</button>
+              <button id="logClear" type="button" class="mini">清空</button>
+              <button id="logExport" type="button" class="mini">导出</button>
+            </div>
+          </div>
+          <textarea id="logView" class="log-view" readonly rows="8" spellcheck="false"></textarea>
+        </section>
+      </div>
     </main>
     <script src="popup.js"></script>
   </body>

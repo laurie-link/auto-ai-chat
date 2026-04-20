@@ -71,6 +71,17 @@ function querySelectorDeep(selector, root = document) {
  * @param {number} timeoutMs
  * @param {number} intervalMs
  */
+async function waitForPageReady() {
+  if (document.readyState !== "complete") {
+    await new Promise((r) => {
+      if (document.readyState === "complete") r();
+      else window.addEventListener("load", () => r(), { once: true });
+    });
+  }
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  await sleep(500);
+}
+
 async function waitFor(fn, timeoutMs = 20000, intervalMs = 200) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -340,6 +351,8 @@ async function runOneQuestion(opts) {
   trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
 
   if (!isGeminiPage()) throw new Error("不在 Gemini 页面");
+
+  await waitForPageReady();
 
   if (opts.newChat) {
     await startNewChat();
