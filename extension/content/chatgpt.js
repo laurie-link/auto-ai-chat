@@ -249,6 +249,88 @@
   }
 
   /**
+   * 将最后一条助手消息滚入视口，避免虚拟列表/懒渲染导致 innerText 偏短。
+   * @param {HTMLElement | null} assistantRoot
+   */
+  function scrollAssistantIntoView(assistantRoot) {
+    if (!assistantRoot) return;
+    try {
+      assistantRoot.scrollIntoView({ block: "end", behavior: "instant" });
+    } catch (_) {
+      try {
+        assistantRoot.scrollIntoView(false);
+      } catch (_) {}
+    }
+    const main = document.querySelector("main");
+    if (main instanceof HTMLElement) {
+      try {
+        main.scrollTop = main.scrollHeight;
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * 优先从正文 .markdown / .prose 取字。勿只用 querySelector 取「第一个」markdown：
+   * 带搜索/多段结构时首块常为 Short answer 摘要，会误判为全文并截断。
+   * @param {HTMLElement | null} assistantRoot
+   */
+  function extractAssistantMessageText(assistantRoot) {
+    if (!assistantRoot) return "";
+
+    const rawBlocks = /** @type {HTMLElement[]} */ (
+      [...assistantRoot.querySelectorAll("div.markdown.prose, div.markdown, .markdown.prose")]
+    );
+    const blocks = rawBlocks.filter((el) => {
+      return !rawBlocks.some((other) => other !== el && other.contains(el));
+    });
+    if (blocks.length > 0) {
+      const merged = blocks
+        .map((el) => (el.innerText || "").replace(/\s+\n/g, "\n").trim())
+        .filter(Boolean)
+        .join("\n\n")
+        .trim();
+      if (merged.length > 40) return merged;
+    }
+
+    const proseSelectors = ['[class*="markdown"]', ".prose", '[class*="prose"]', "article"];
+    let best = "";
+    for (const sel of proseSelectors) {
+      try {
+        assistantRoot.querySelectorAll(sel).forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          const t = (el.innerText || "").replace(/\s+\n/g, "\n").trim();
+          if (t.length > best.length) best = t;
+        });
+      } catch (_) {
+        /* ignore invalid selector */
+      }
+    }
+    if (best.length >= 120) return best;
+
+    const clone = /** @type {HTMLElement} */ (assistantRoot.cloneNode(true));
+    clone
+      .querySelectorAll(
+        [
+          "button",
+          '[role="button"]',
+          "aside",
+          "nav",
+          '[data-testid="stop-button"]',
+          '[data-testid="copy-button"]',
+          '[class*="SearchResult"]',
+          '[class*="search-result"]',
+          '[class*="web-result"]',
+          '[class*="citation-card"]',
+          '[class*="shopping"]',
+          '[class*="product"]',
+        ].join(", ")
+      )
+      .forEach((n) => n.remove());
+    const fallback = (clone.innerText || "").replace(/\s+\n/g, "\n").trim();
+    return best.length > fallback.length ? best : fallback;
+  }
+
+  /**
    * @param {HTMLElement} root
    */
   function extractCitationsFrom(root) {
@@ -271,18 +353,21 @@
     const root = /** @type {HTMLElement} */ (findConversationRoot());
 
     await waitUntil(() => !isGenerating(), 180000, 400);
+    await sleep(900);
 
     let lastText = "";
     let stableTicks = 0;
 
-    for (let i = 0; i < 120; i++) {
-      await sleep(280);
+    for (let i = 0; i < 140; i++) {
+      await sleep(320);
       const nodes = collectAssistantRoots();
       const last =
         nodes.length > 0
           ? /** @type {HTMLElement} */ (nodes[nodes.length - 1])
           : null;
-      const text = (last?.innerText || "").trim() || (root.innerText || "").trim();
+      scrollAssistantIntoView(last);
+      await sleep(120);
+      const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
 
       if (text.length < 1) continue;
 
@@ -290,15 +375,22 @@
       else stableTicks = 0;
       lastText = text;
 
-      if (stableTicks >= 8 && !isGenerating()) {
-        return { text, element: last || root };
+      if (stableTicks >= 10 && !isGenerating()) {
+        scrollAssistantIntoView(last);
+        await sleep(200);
+        const finalText =
+          extractAssistantMessageText(last) || (last?.innerText || "").trim() || text;
+        return { text: finalText, element: last || root };
       }
     }
 
     const nodes = collectAssistantRoots();
     const last =
       nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
-    return { text: (last.innerText || "").trim(), element: last };
+    scrollAssistantIntoView(last);
+    await sleep(250);
+    const text = extractAssistantMessageText(last) || (last.innerText || "").trim();
+    return { text, element: last };
   }
 
   /**

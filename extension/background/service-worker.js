@@ -826,6 +826,20 @@ async function saveRunToStorage(results, site) {
 }
 
 /**
+ * MV3 Service Worker 中 `URL.createObjectURL` 可能不可用，下载用 data: base64。
+ * @param {Uint8Array} bytes
+ */
+function uint8ArrayToBase64DataUrl(bytes, mime) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  const b64 = btoa(binary);
+  return `data:${mime};base64,${b64}`;
+}
+
+/**
  * @param {{ site?: string, results?: object[] }} lastRun
  * @returns {Uint8Array}
  */
@@ -913,10 +927,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
         } else {
           const buf = buildXlsxBuffer(last);
-          const blob = new Blob([buf], {
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          });
-          const url = URL.createObjectURL(blob);
+          const mime =
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+          let url;
+          if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+            const blob = new Blob([buf], { type: mime });
+            url = URL.createObjectURL(blob);
+          } else {
+            url = uint8ArrayToBase64DataUrl(buf, mime);
+          }
           try {
             await chrome.downloads.download({
               url,
@@ -924,7 +943,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               saveAs: false,
             });
           } finally {
-            URL.revokeObjectURL(url);
+            if (url.startsWith("blob:") && typeof URL !== "undefined" && URL.revokeObjectURL) {
+              URL.revokeObjectURL(url);
+            }
           }
         }
         sendResponse({ ok: true });
