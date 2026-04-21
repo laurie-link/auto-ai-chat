@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI AutoChat</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="topbar">
+        <h1 class="title">AI AutoChat</h1>
+        <nav class="tabs" role="tablist" aria-label="主标签">
+          <button type="button" class="tab active" data-tab="run" id="tabRun" role="tab" aria-selected="true">
+            运行
+          </button>
+          <button type="button" class="tab" data-tab="settings" id="tabSettings" role="tab" aria-selected="false">
+            设置
+          </button>
+        </nav>
+      </header>
+
+      <p id="status" class="status global-status" role="status"></p>
+
+      <div id="panelRun" class="tab-panel" role="tabpanel" aria-labelledby="tabRun">
+        <textarea
+          id="questions"
+          rows="9"
+          placeholder="每行一个问题"
+          spellcheck="false"
+        ></textarea>
+
+        <section class="dify-run-panel" aria-label="Dify">
+          <label class="run-field">
+            <span class="run-label">target_brands</span>
+            <input type="text" id="difyTargetBrands" spellcheck="false" autocomplete="off" />
+          </label>
+        </section>
+
+        <div class="row">
+          <button id="runGemini" type="button" class="primary full">Gemini</button>
+        </div>
+        <div class="row">
+          <button id="runChatgpt" type="button" class="primary chatgpt full">ChatGPT</button>
+        </div>
+        <div class="row">
+          <button id="runPerplexity" type="button" class="primary perplexity full">Perplexity</button>
+        </div>
+      </div>
+
+      <div id="panelSettings" class="tab-panel" role="tabpanel" aria-labelledby="tabSettings" hidden>
+        <section class="settings-block" aria-label="API">
+          <label class="settings-field">
+            <span class="settings-label">API 根地址</span>
+            <input type="text" id="difyBaseUrl" placeholder="http://…" spellcheck="false" autocomplete="off" />
+          </label>
+          <label class="settings-field">
+            <span class="settings-label">API Key</span>
+            <input type="password" id="difyApiKey" placeholder="" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="settings-field">
+            <span class="settings-label">API user</span>
+            <input type="text" id="difyApiUser" spellcheck="false" autocomplete="off" />
+          </label>
+        </section>
+
+        <section class="debug" aria-label="调试日志">
+          <div class="debug-head">
+            <span class="debug-title">日志</span>
+            <div class="debug-actions">
+              <button id="logRefresh" type="button" class="mini">刷新</button>
+              <button id="logClear" type="button" class="mini">清空</button>
+              <button id="logExport" type="button" class="mini">导出</button>
+            </div>
+          </div>
+          <textarea id="logView" class="log-view" readonly rows="8" spellcheck="false"></textarea>
+        </section>
+      </div>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
