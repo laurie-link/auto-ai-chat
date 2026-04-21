@@ -1,0 +1,370 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  background: #fafafa;
+}
+
+.wrap {
+  width: 360px;
+  padding: 12px 14px 14px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+}
+
+.tab:hover {
+  background: #f3f3f3;
+}
+
+.tab.active {
+  background: #1a73e8;
+  border-color: #1a73e8;
+  color: #fff;
+}
+
+.tab-panel[hidden] {
+  display: none !important;
+}
+
+.global-status {
+  margin: 0 0 10px;
+  min-height: 1.15em;
+  font-size: 11px;
+  color: #444;
+}
+
+textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  resize: vertical;
+  min-height: 140px;
+  font: inherit;
+  line-height: 1.45;
+}
+
+textarea:focus {
+  outline: 2px solid #1a73e8;
+  outline-offset: 1px;
+  border-color: #1a73e8;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+button {
+  font: inherit;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+button.primary {
+  flex: 1;
+  background: #1a73e8;
+  color: #fff;
+}
+
+button.primary:hover {
+  background: #1557b0;
+}
+
+button.primary.chatgpt {
+  background: #10a37f;
+}
+
+button.primary.chatgpt:hover {
+  background: #0d8a6a;
+}
+
+button.primary.perplexity {
+  background: #20808d;
+}
+
+button.primary.perplexity:hover {
+  background: #1a6b76;
+}
+
+button.primary.google-aio {
+  background: #4285f4;
+}
+
+button.primary.google-aio:hover {
+  background: #3367d6;
+}
+
+button.primary.google-aimode {
+  background: #174ea6;
+}
+
+button.primary.google-aimode:hover {
+  background: #143e85;
+}
+
+button.primary.full {
+  flex: 1;
+  width: 100%;
+}
+
+button.ghost {
+  background: #fff;
+  border-color: #ccc;
+  color: #333;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status.error {
+  color: #b3261e;
+}
+
+.dify-run-panel {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e0e8f0;
+}
+
+.run-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.run-check input {
+  margin-top: 2px;
+}
+
+.run-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+  font-size: 11px;
+}
+
+.run-label {
+  color: #555;
+}
+
+.run-field input[type="text"] {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.run-field input[type="file"] {
+  font-size: 11px;
+  max-width: 100%;
+}
+
+.run-dify-btn {
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #174ea6;
+  background: #fff;
+  color: #174ea6;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-dify-btn:hover:not(:disabled) {
+  background: #e8f1ff;
+}
+
+.run-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #2e7d32;
+  line-height: 1.35;
+  min-height: 1em;
+}
+
+.run-hint.is-error {
+  color: #c62828;
+}
+
+.export-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e8e8e8;
+}
+
+.export-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 12px;
+}
+
+.export-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #333;
+}
+
+.export-opt input {
+  margin: 0;
+}
+
+button.export-btn-inline {
+  margin-left: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.last-run-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.35;
+  min-height: 1.1em;
+}
+
+.last-run-hint.error-hint {
+  color: #b3261e;
+  margin-top: 4px;
+}
+
+/* —— 设置 —— */
+.settings-block {
+  margin-bottom: 14px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #333;
+}
+
+.settings-label {
+  color: #555;
+}
+
+.settings-field input[type="text"],
+.settings-field input[type="password"] {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.settings-field input[type="file"] {
+  font-size: 11px;
+  max-width: 100%;
+}
+
+.settings-field input:focus {
+  outline: 2px solid #1a73e8;
+  outline-offset: 1px;
+  border-color: #1a73e8;
+}
+
+.debug {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.debug-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+}
+
+.debug-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+button.mini {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #ccc;
+  color: #333;
+}
+
+button.mini:hover {
+  background: #f3f3f3;
+}
+
+.log-view {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  resize: vertical;
+  min-height: 120px;
+  max-height: 220px;
+  color: #222;
+}
