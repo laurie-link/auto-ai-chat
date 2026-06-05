@@ -1,7 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 const DIFY_DEFAULTS = {
-  difyBaseUrl: "http://136.111.30.83",
+  difyBaseUrl: "https://dify.aiexplorerxj.top",
+  difyApiKey: "app-JGuIE0oeaKEguRu3FV79dtm8",
   difyApiUser: "ai-autochat-extension",
 };
 
@@ -85,7 +86,10 @@ async function loadDifySettings() {
   }
   const key = $("difyApiKey");
   if (key instanceof HTMLInputElement) {
-    key.value = typeof data.difyApiKey === "string" ? data.difyApiKey : "";
+    key.value =
+      typeof data.difyApiKey === "string" && data.difyApiKey.trim()
+        ? data.difyApiKey
+        : DIFY_DEFAULTS.difyApiKey;
   }
   const user = $("difyApiUser");
   if (user instanceof HTMLInputElement) {
@@ -112,7 +116,10 @@ function persistDifySettings() {
       baseEl instanceof HTMLInputElement && String(baseEl.value || "").trim()
         ? String(baseEl.value).trim()
         : DIFY_DEFAULTS.difyBaseUrl,
-    difyApiKey: keyEl instanceof HTMLInputElement ? String(keyEl.value || "") : "",
+    difyApiKey:
+      keyEl instanceof HTMLInputElement && String(keyEl.value || "").trim()
+        ? String(keyEl.value).trim()
+        : DIFY_DEFAULTS.difyApiKey,
     difyApiUser:
       userEl instanceof HTMLInputElement && String(userEl.value || "").trim()
         ? String(userEl.value).trim()
@@ -425,14 +432,19 @@ if (runDifyFromFileBtn instanceof HTMLButtonElement) {
     }
     const baseEl = $("difyBaseUrl");
     const keyEl = $("difyApiKey");
-    if (
-      !(baseEl instanceof HTMLInputElement) ||
-      !String(baseEl.value || "").trim()
-    ) {
+    const baseVal =
+      baseEl instanceof HTMLInputElement
+        ? String(baseEl.value || "").trim() || DIFY_DEFAULTS.difyBaseUrl
+        : "";
+    const keyVal =
+      keyEl instanceof HTMLInputElement
+        ? String(keyEl.value || "").trim() || DIFY_DEFAULTS.difyApiKey
+        : "";
+    if (!(baseEl instanceof HTMLInputElement) || !baseVal) {
       setStatus("请在「设置」中填写 API 根地址。", true);
       return;
     }
-    if (!(keyEl instanceof HTMLInputElement) || !String(keyEl.value || "").trim()) {
+    if (!(keyEl instanceof HTMLInputElement) || !keyVal) {
       setStatus("请在「设置」中填写 API Key。", true);
       return;
     }

@@ -9,6 +9,12 @@ import {
 } from "../lib/dify-workflow.js";
 import * as XLSX from "../vendor/xlsx.mjs";
 
+/** 与 popup 中 DIFY_DEFAULTS 保持一致，供未写入 storage 时使用 */
+const DIFY_DEFAULTS = {
+  difyBaseUrl: "https://dify.aiexplorerxj.top",
+  difyApiKey: "app-JGuIE0oeaKEguRu3FV79dtm8",
+};
+
 const GEMINI_ORIGIN = "https://gemini.google.com";
 const GEMINI_CS_FILE = "content/gemini.js";
 
@@ -931,8 +937,10 @@ async function downloadCsvText(csvText, filenameBase = "Brand_Visibility_Report"
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
 async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uploadBaseName) {
-  const apiBase = normalizeDifyApiBase(cfg.difyBaseUrl || "");
-  const apiKey = String(cfg.difyApiKey || "").trim();
+  const apiBase = normalizeDifyApiBase(
+    String(cfg.difyBaseUrl || "").trim() || DIFY_DEFAULTS.difyBaseUrl
+  );
+  const apiKey = String(cfg.difyApiKey || "").trim() || DIFY_DEFAULTS.difyApiKey;
   const userId =
     String(cfg.difyApiUser || "ai-autochat-extension").trim() || "ai-autochat-extension";
   const brands = String(targetBrands || "").trim();
@@ -1034,8 +1042,10 @@ async function runDifyJsonJob(msg) {
       "difyApiUser",
       "difyTargetBrands",
     ]);
-    const apiBase = normalizeDifyApiBase(cfg.difyBaseUrl || "");
-    const apiKey = String(cfg.difyApiKey || "").trim();
+    const apiBase = normalizeDifyApiBase(
+      String(cfg.difyBaseUrl || "").trim() || DIFY_DEFAULTS.difyBaseUrl
+    );
+    const apiKey = String(cfg.difyApiKey || "").trim() || DIFY_DEFAULTS.difyApiKey;
     const userId =
       String(cfg.difyApiUser || "ai-autochat-extension").trim() || "ai-autochat-extension";
     const brands = String(targetBrands || cfg.difyTargetBrands || "").trim();

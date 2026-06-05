@@ -5,8 +5,7 @@
   "description": "按预设问题访问各 AI 站点，采集回复与引用并保存到本地（Gemini、ChatGPT、Perplexity、Google AI Overview / AI Mode 等）。",
   "permissions": ["storage", "tabs", "downloads", "scripting", "webNavigation"],
   "host_permissions": [
-    "*://136.111.30.83/*",
-    "http://136.111.30.83:5001/*",
+    "https://dify.aiexplorerxj.top/*",
     "https://gemini.google.com/*",
     "https://chatgpt.com/*",
     "https://*.chatgpt.com/*",
