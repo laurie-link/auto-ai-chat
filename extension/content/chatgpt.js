@@ -67,40 +67,44 @@
   }
 
   /**
-   * MCP 实测：侧栏「New chat」多为 `a[href="/"]`，纯文本以 New chat 开头（可能带 CtrlShiftO 等快捷键文案）；
-   * `data-testid="sidebar-new-chat"` 当前版本未出现。
+   * 是否可见（排除 display:none / 零尺寸），避免命中隐藏 textarea 等。
+   * @param {Element} el
+   */
+  function isVisible(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const st = getComputedStyle(el);
+    if (st.visibility === "hidden" || st.display === "none") return false;
+    return true;
+  }
+
+  /**
+   * 新建对话：优先 ChatGPT 稳定 data-testid（Playwright MCP 实测 chatgpt.com 2026）。
+   * 顺序：create-new-chat-button → sidebar-new-chat → new-chat-button。
    *
    * @returns {HTMLElement | null}
    */
   function findNewChatButton() {
-    const byTest =
-      document.querySelector('[data-testid="sidebar-new-chat"]') ||
-      document.querySelector('[data-testid="new-chat-button"]');
-    if (byTest instanceof HTMLElement) return byTest;
-
-    const byHomeLink = Array.from(document.querySelectorAll('a[href="/"]')).find((a) => {
-      const raw = (a.textContent || "").replace(/\u00a0/g, " ").trim().toLowerCase();
-      const head = raw.split(/ctrl|⌘|shift|shortcut/i)[0].trim();
-      return head.startsWith("new chat") || head.startsWith("新对话");
-    });
-    if (byHomeLink instanceof HTMLElement) return byHomeLink;
-
-    const btn = Array.from(document.querySelectorAll("button, a[role='button'], a")).find((el) => {
-      const aria = (el.getAttribute("aria-label") || "").toLowerCase();
-      const t = (el.textContent || "").trim().toLowerCase();
-      return (
-        aria.includes("new chat") ||
-        aria.includes("新对话") ||
-        t === "new chat" ||
-        t.startsWith("new chat") ||
-        t === "新对话"
-      );
-    });
-    return /** @type {HTMLElement | null} */ (btn || null);
+    const ids = [
+      "create-new-chat-button",
+      "sidebar-new-chat",
+      "new-chat-button",
+    ];
+    for (const id of ids) {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      if (el instanceof HTMLElement && isVisible(el)) return el;
+    }
+    /** 无 testid 的旧版：侧栏会话列表上方第一条「新开对话」常为 ul 首项链到 / */
+    const sidebarFirst = document.querySelector(
+      "aside [role=\"navigation\"] ul > li:first-child a[href=\"/\"], aside nav ul > li:first-child a[href=\"/\"]"
+    );
+    if (sidebarFirst instanceof HTMLElement && isVisible(sidebarFirst)) return sidebarFirst;
+    return null;
   }
 
   async function startNewChat() {
-    trace("info", "startNewChat: 查找「新对话」");
+    trace("info", "startNewChat: 查找 data-testid create-new-chat / sidebar-new-chat");
     const el = await waitFor(() => findNewChatButton(), 22000, 250);
     trace("info", "startNewChat: 点击", {
       tag: el.tagName,
@@ -112,43 +116,49 @@
   }
 
   /**
-   * MCP 实测：`#prompt-textarea` 常为带 ProseMirror 的 div（`role="textbox"`，`aria-label="Chat with ChatGPT"`），不是 textarea。
+   * 主输入区：`#prompt-textarea`（多为 ProseMirror div + role=textbox），与界面语言无关。
+   * 回退：name / 主区域可见 textarea / 可见 contenteditable textbox（仍用结构，不用文案）。
    *
    * @returns {HTMLElement | null}
    */
   function findPromptEditor() {
     const byId = document.querySelector("#prompt-textarea");
-    if (byId instanceof HTMLElement) {
-      const rect = byId.getBoundingClientRect();
-      if (rect.width > 16 && rect.height > 8) return byId;
+    if (byId instanceof HTMLElement && isVisible(byId)) {
+      return byId;
     }
 
-    const labeled = document.querySelector(
-      '[role="textbox"][aria-label="Chat with ChatGPT"], [role="textbox"][aria-label*="ChatGPT"]'
-    );
-    if (labeled instanceof HTMLElement) return labeled;
-
     const byName = document.querySelector('textarea[name="prompt-textarea"]');
-    if (byName instanceof HTMLElement) return byName;
+    if (byName instanceof HTMLElement && isVisible(byName)) return byName;
 
-    const placeholder = document.querySelector(
-      'textarea[placeholder*="Message"], textarea[placeholder*="message"], textarea[placeholder*="Ask"]'
-    );
-    if (placeholder instanceof HTMLElement) return placeholder;
+    const main = document.querySelector("main");
+    if (main) {
+      const tas = /** @type {HTMLTextAreaElement[]} */ ([...main.querySelectorAll("textarea")]);
+      let best = /** @type {HTMLTextAreaElement | null} */ (null);
+      let bestArea = 0;
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const r = ta.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (area > bestArea) {
+          bestArea = area;
+          best = ta;
+        }
+      }
+      if (best) return best;
+
+      const editables = /** @type {HTMLElement[]} */ (
+        [...main.querySelectorAll('[role="textbox"][contenteditable="true"], .ProseMirror[contenteditable="true"]')]
+      );
+      for (const el of editables) {
+        if (isVisible(el) && el.getBoundingClientRect().width > 40) return el;
+      }
+    }
 
     const pm = document.querySelector(
       'div[contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"]'
     );
-    if (pm instanceof HTMLElement) {
-      const rect = pm.getBoundingClientRect();
-      if (rect.width > 40 && rect.height > 16) return pm;
-    }
+    if (pm instanceof HTMLElement && isVisible(pm) && pm.getBoundingClientRect().width > 40) return pm;
 
-    const ta = document.querySelector("textarea");
-    if (ta instanceof HTMLElement) {
-      const rect = ta.getBoundingClientRect();
-      if (rect.width > 40 && rect.height > 16) return ta;
-    }
     return null;
   }
 
@@ -187,41 +197,26 @@
   }
 
   /**
-   * MCP 实测：空输入时第三颗按钮可能是「Start Voice」；填入内容后出现 `data-testid="send-button"`，`aria-label="Send prompt"`。
+   * 发送：`data-testid="send-button"`（有内容且可点时启用；与语言无关）。
    *
    * @returns {HTMLElement | null}
    */
   function findSendButton() {
-    const byTest =
-      document.querySelector('[data-testid="send-button"]') ||
-      document.querySelector('button[data-testid="send-button"]');
-    if (byTest instanceof HTMLButtonElement && byTest.disabled) {
-      return null;
+    const byTest = document.querySelector('[data-testid="send-button"]');
+    if (byTest instanceof HTMLButtonElement) {
+      if (byTest.disabled || !isVisible(byTest)) return null;
+      return byTest;
     }
-    if (byTest instanceof HTMLElement) return byTest;
-
-    const byAria = Array.from(document.querySelectorAll("button")).find((b) => {
-      const a = (b.getAttribute("aria-label") || "").toLowerCase();
-      return (
-        a.includes("send prompt") ||
-        a.includes("send message") ||
-        a.includes("send") ||
-        a.includes("发送")
-      );
-    });
-    return /** @type {HTMLElement | null} */ (byAria || null);
+    if (byTest instanceof HTMLElement && isVisible(byTest)) return byTest;
+    return null;
   }
 
+  /**
+   * 生成中：仅依赖 `data-testid="stop-button"` 可见（ChatGPT 各语言 UI 一致）。
+   */
   function isGenerating() {
-    if (document.querySelector('[data-testid="stop-button"]')) return true;
-    return Array.from(document.querySelectorAll("button")).some((b) => {
-      const a = (b.getAttribute("aria-label") || "").toLowerCase();
-      return (
-        a.includes("stop") ||
-        a.includes("停止") ||
-        a.includes("stop generating")
-      );
-    });
+    const stop = document.querySelector('[data-testid="stop-button"]');
+    return stop instanceof HTMLElement && isVisible(stop);
   }
 
   /**
@@ -363,13 +358,17 @@
   async function waitForAnswerStable(_userQuestion) {
     const root = /** @type {HTMLElement} */ (findConversationRoot());
 
+    /** 留出时间让「停止生成」等控件出现，避免误判为已结束（各语言界面均适用） */
+    await sleep(900);
     await waitUntil(() => !isGenerating(), 180000, 400);
     await sleep(900);
 
     let lastText = "";
     let stableTicks = 0;
+    /** 过短正文不参与「稳定」判定，避免空串/占位符连续命中提前返回 */
+    const minStableLen = 12;
 
-    for (let i = 0; i < 140; i++) {
+    for (let i = 0; i < 180; i++) {
       await sleep(320);
       const nodes = collectAssistantRoots();
       const last =
@@ -380,7 +379,11 @@
       await sleep(120);
       const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
 
-      if (text.length < 1) continue;
+      if (text.length < minStableLen) {
+        stableTicks = 0;
+        lastText = text;
+        continue;
+      }
 
       if (text === lastText) stableTicks += 1;
       else stableTicks = 0;

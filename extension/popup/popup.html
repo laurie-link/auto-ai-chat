@@ -29,6 +29,14 @@
           placeholder="每行一个问题"
           spellcheck="false"
         ></textarea>
+
+        <section class="dify-run-panel" aria-label="Dify">
+          <label class="run-field">
+            <span class="run-label">target_brands</span>
+            <input type="text" id="difyTargetBrands" spellcheck="false" autocomplete="off" />
+          </label>
+        </section>
+
         <div class="row">
           <button id="runGemini" type="button" class="primary full">Gemini</button>
         </div>
@@ -38,45 +46,6 @@
         <div class="row">
           <button id="runPerplexity" type="button" class="primary perplexity full">Perplexity</button>
         </div>
-        <div class="row">
-          <button id="runGoogleAio" type="button" class="primary google-aio full">Google AI Overview</button>
-        </div>
-        <div class="row">
-          <button id="runGoogleAimode" type="button" class="primary google-aimode full">Google AI Mode</button>
-        </div>
-
-        <section class="dify-run-panel" aria-label="Dify">
-          <label class="run-check">
-            <input type="checkbox" id="difyWorkflowEnabled" />
-            采集完成后自动跑 Dify 并下载 CSV
-          </label>
-          <label class="run-field">
-            <span class="run-label">target_brands</span>
-            <input type="text" id="difyTargetBrands" spellcheck="false" autocomplete="off" />
-          </label>
-          <label class="run-field">
-            <span class="run-label">JSON</span>
-            <input type="file" id="difyJsonFile" accept=".json,application/json" />
-          </label>
-          <button type="button" id="runDifyFromFile" class="run-dify-btn">JSON → Dify → CSV</button>
-          <p id="difyLastHint" class="run-hint" role="status"></p>
-        </section>
-
-        <section class="export-block" aria-label="导出">
-          <div class="export-row">
-            <label class="export-opt"
-              ><input type="radio" name="exportFormat" value="json" checked /> JSON</label
-            >
-            <label class="export-opt"
-              ><input type="radio" name="exportFormat" value="xlsx" /> xlsx</label
-            >
-            <button id="downloadLastRun" type="button" class="ghost export-btn-inline" disabled>
-              下载上次结果
-            </button>
-          </div>
-          <p id="lastRunHint" class="last-run-hint"></p>
-          <p id="lastErrorHint" class="last-run-hint error-hint" hidden></p>
-        </section>
       </div>
 
       <div id="panelSettings" class="tab-panel" role="tabpanel" aria-labelledby="tabSettings" hidden>

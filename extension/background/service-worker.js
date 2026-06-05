@@ -1,7 +1,6 @@
 import { appendLog, clearLogs, getLogs } from "../lib/logger.js";
 import {
   buildWorkflowExportJson,
-  difyRunWorkflowBlocking,
   difyRunWorkflowBlockingWithTypeRetry,
   difyUploadFile,
   normalizeDifyApiBase,
@@ -970,27 +969,13 @@ async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uplo
     });
 
     const fileId = await difyUploadFile(apiBase, apiKey, userId, blob, fname);
-    let csv;
-    try {
-      csv = await difyRunWorkflowBlocking(
-        apiBase,
-        apiKey,
-        userId,
-        fileId,
-        brands,
-        "document"
-      );
-    } catch (firstErr) {
-      await trace("warn", "background", "Dify：以 document 执行失败，改用 custom 重试", String(firstErr));
-      csv = await difyRunWorkflowBlocking(
-        apiBase,
-        apiKey,
-        userId,
-        fileId,
-        brands,
-        "custom"
-      );
-    }
+    const csv = await difyRunWorkflowBlockingWithTypeRetry(
+      apiBase,
+      apiKey,
+      userId,
+      fileId,
+      brands
+    );
 
     await downloadCsvText(csv, "Brand_Visibility_Report");
     await chrome.storage.local.set({

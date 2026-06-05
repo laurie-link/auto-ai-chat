@@ -24,8 +24,6 @@ const RUN_BUTTON_IDS = [
   "runGemini",
   "runChatgpt",
   "runPerplexity",
-  "runGoogleAio",
-  "runGoogleAimode",
 ];
 
 function setRunButtonsDisabled(disabled) {
@@ -35,48 +33,15 @@ function setRunButtonsDisabled(disabled) {
   }
 }
 
-function getExportFormat() {
-  const checked = document.querySelector('input[name="exportFormat"]:checked');
-  return checked?.value === "xlsx" ? "xlsx" : "json";
-}
-
-async function refreshDifyHint() {
-  const el = $("difyLastHint");
-  if (!el) return;
-  try {
-    const data = await chrome.storage.local.get(["lastDifyRun"]);
-    const d = data.lastDifyRun;
-    if (!d) {
-      el.textContent = "";
-      el.classList.remove("is-error");
-      return;
-    }
-    const at = d.at ? String(d.at).replace("T", " ").slice(0, 19) : "";
-    if (d.ok) {
-      el.textContent = at ? `${at} · ${d.message || "OK"}` : (d.message || "OK");
-      el.classList.remove("is-error");
-    } else {
-      el.textContent = `${at ? `${at} · ` : ""}${String(d.error || "失败").slice(0, 240)}`;
-      el.classList.add("is-error");
-    }
-  } catch {
-    el.textContent = "";
-    el.classList.remove("is-error");
-  }
-}
-
 async function loadDifySettings() {
+  await chrome.storage.local.set({ difyWorkflowEnabled: true });
+
   const data = await chrome.storage.local.get([
-    "difyWorkflowEnabled",
     "difyBaseUrl",
     "difyApiKey",
     "difyApiUser",
     "difyTargetBrands",
   ]);
-  const en = $("difyWorkflowEnabled");
-  if (en instanceof HTMLInputElement) {
-    en.checked = Boolean(data.difyWorkflowEnabled);
-  }
   const base = $("difyBaseUrl");
   if (base instanceof HTMLInputElement) {
     base.value =
@@ -105,13 +70,12 @@ async function loadDifySettings() {
 }
 
 function persistDifySettings() {
-  const wf = $("difyWorkflowEnabled");
   const baseEl = $("difyBaseUrl");
   const keyEl = $("difyApiKey");
   const userEl = $("difyApiUser");
   const brandsEl = $("difyTargetBrands");
   chrome.storage.local.set({
-    difyWorkflowEnabled: wf instanceof HTMLInputElement && wf.checked,
+    difyWorkflowEnabled: true,
     difyBaseUrl:
       baseEl instanceof HTMLInputElement && String(baseEl.value || "").trim()
         ? String(baseEl.value).trim()
@@ -126,47 +90,6 @@ function persistDifySettings() {
         : DIFY_DEFAULTS.difyApiUser,
     difyTargetBrands: brandsEl instanceof HTMLInputElement ? String(brandsEl.value || "").trim() : "",
   });
-}
-
-async function refreshLastRunHint() {
-  const btn = $("downloadLastRun");
-  const hint = $("lastRunHint");
-  const errEl = $("lastErrorHint");
-  if (!btn || !hint) return;
-  try {
-    const data = await chrome.storage.local.get(["lastRun", "lastRunError"]);
-    const last = data.lastRun;
-    const n = Array.isArray(last?.results) ? last.results.length : 0;
-    if (n > 0 && last?.site) {
-      btn.disabled = false;
-      const at = last.completedAt ? String(last.completedAt).replace("T", " ").slice(0, 19) : "";
-      hint.textContent = `${last.site} · ${n} 条${at ? ` · ${at}` : ""}`;
-    } else {
-      btn.disabled = true;
-      hint.textContent = "";
-    }
-
-    const le = data.lastRunError;
-    if (errEl) {
-      if (le && (le.error || le.phase)) {
-        const step = le.step ? ` ${le.step}` : "";
-        const short = String(le.error || "").slice(0, 160);
-        errEl.textContent = `${le.phase || "?"}${step} · ${short}`;
-        errEl.hidden = false;
-      } else {
-        errEl.textContent = "";
-        errEl.hidden = true;
-      }
-    }
-  } catch (e) {
-    btn.disabled = true;
-    hint.textContent = `读取失败: ${e?.message || e}`;
-    if (errEl) {
-      errEl.textContent = "";
-      errEl.hidden = true;
-    }
-  }
-  await refreshDifyHint();
 }
 
 function popupTrace(message, detail) {
@@ -288,7 +211,6 @@ async function runQueue(runtimeType, runningMsg, okLabel) {
     clearInterval(difyPhasePoll);
     setRunButtonsDisabled(false);
     if (!skipLoadLogsInFinally) await loadLogs();
-    await refreshLastRunHint();
   }
 }
 
@@ -316,22 +238,6 @@ $("runPerplexity").addEventListener("click", async () => {
   );
 });
 
-$("runGoogleAio").addEventListener("click", async () => {
-  await runQueue(
-    "RUN_GOOGLE_AIO",
-    "运行中…（请勿关闭 Google 标签页）",
-    "Google AI Overview"
-  );
-});
-
-$("runGoogleAimode").addEventListener("click", async () => {
-  await runQueue(
-    "RUN_GOOGLE_AIMODE",
-    "运行中…（请勿关闭 Google 标签页）",
-    "Google AI Mode"
-  );
-});
-
 $("logRefresh").addEventListener("click", () => loadLogs());
 $("logClear").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "CLEAR_DEBUG_LOG" });
@@ -350,30 +256,11 @@ $("logExport").addEventListener("click", async () => {
   }
 });
 
-chrome.storage.local.get(["lastQuestions", "exportFormat"], (data) => {
+chrome.storage.local.get(["lastQuestions"], (data) => {
   if (typeof data.lastQuestions === "string" && data.lastQuestions.trim()) {
     $("questions").value = data.lastQuestions;
   }
-  if (data.exportFormat === "xlsx" || data.exportFormat === "json") {
-    const radio = document.querySelector(`input[name="exportFormat"][value="${data.exportFormat}"]`);
-    if (radio instanceof HTMLInputElement) radio.checked = true;
-  }
 });
-
-document.querySelectorAll('input[name="exportFormat"]').forEach((el) => {
-  el.addEventListener("change", () => {
-    chrome.storage.local.set({ exportFormat: getExportFormat() });
-  });
-});
-
-function readFileAsText(file) {
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result || ""));
-    fr.onerror = () => reject(new Error("读取文件失败"));
-    fr.readAsText(file, "UTF-8");
-  });
-}
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let difyBgWaitPollId = null;
@@ -386,21 +273,17 @@ function stopDifyBgWaitPoll() {
 }
 
 /**
- * 弹窗曾关闭但后台仍在跑阻塞工作流时，根据 difyWorkflowRunInProgress 恢复按钮与提示。
+ * 弹窗曾关闭但后台仍在跑阻塞工作流时，根据 difyWorkflowRunInProgress 恢复提示。
  */
 async function resumeDifyJobIfBackgroundBusy() {
   const { difyWorkflowRunInProgress } = await chrome.storage.local.get("difyWorkflowRunInProgress");
   if (!difyWorkflowRunInProgress) return;
-  const btn = $("runDifyFromFile");
-  if (btn instanceof HTMLButtonElement) btn.disabled = true;
   setStatus("工作流仍在后台执行，请稍候…");
   stopDifyBgWaitPoll();
   difyBgWaitPollId = setInterval(async () => {
     const d = await chrome.storage.local.get(["difyWorkflowRunInProgress", "lastDifyRun"]);
     if (d.difyWorkflowRunInProgress) return;
     stopDifyBgWaitPoll();
-    const b = $("runDifyFromFile");
-    if (b instanceof HTMLButtonElement) b.disabled = false;
     const last = d.lastDifyRun;
     if (last?.ok) {
       setStatus("已完成 · CSV 已下载");
@@ -409,106 +292,9 @@ async function resumeDifyJobIfBackgroundBusy() {
     } else {
       setStatus("");
     }
-    await refreshDifyHint();
     await loadLogs();
   }, 800);
 }
-
-const runDifyFromFileBtn = $("runDifyFromFile");
-if (runDifyFromFileBtn instanceof HTMLButtonElement) {
-  runDifyFromFileBtn.addEventListener("click", async () => {
-    const fileInput = $("difyJsonFile");
-    if (!(fileInput instanceof HTMLInputElement) || !fileInput.files?.length) {
-      setStatus("请先选择 JSON 文件。", true);
-      return;
-    }
-    persistDifySettings();
-    const brandsEl = $("difyTargetBrands");
-    const targetBrands =
-      brandsEl instanceof HTMLInputElement ? String(brandsEl.value || "").trim() : "";
-    if (!targetBrands) {
-      setStatus("请填写 target_brands。", true);
-      return;
-    }
-    const baseEl = $("difyBaseUrl");
-    const keyEl = $("difyApiKey");
-    const baseVal =
-      baseEl instanceof HTMLInputElement
-        ? String(baseEl.value || "").trim() || DIFY_DEFAULTS.difyBaseUrl
-        : "";
-    const keyVal =
-      keyEl instanceof HTMLInputElement
-        ? String(keyEl.value || "").trim() || DIFY_DEFAULTS.difyApiKey
-        : "";
-    if (!(baseEl instanceof HTMLInputElement) || !baseVal) {
-      setStatus("请在「设置」中填写 API 根地址。", true);
-      return;
-    }
-    if (!(keyEl instanceof HTMLInputElement) || !keyVal) {
-      setStatus("请在「设置」中填写 API Key。", true);
-      return;
-    }
-    const file = fileInput.files[0];
-    let jsonText;
-    try {
-      jsonText = await readFileAsText(file);
-    } catch (e) {
-      setStatus(String(e?.message || e), true);
-      return;
-    }
-
-    runDifyFromFileBtn.disabled = true;
-    setStatus("Dify 工作流运行中，请等待结果…");
-    popupTrace("DIFY_RUN_START", { name: file.name, len: jsonText.length });
-
-    try {
-      const res = await chrome.runtime.sendMessage({
-        type: "START_DIFY_JSON",
-        jsonText,
-        targetBrands,
-      });
-      if (!res) {
-        setStatus("无法连接扩展后台（请重新打开本弹窗或重载扩展）。", true);
-        appendLocalDebugLine("error", "Dify", "sendMessage 无响应");
-        return;
-      }
-      if (!res.ok) {
-        setStatus(String(res.error || "失败"), true);
-        appendLocalDebugLine("error", "Dify", String(res.error || "失败"));
-        return;
-      }
-      setStatus("已完成 · CSV 已下载");
-    } catch (e) {
-      const msg = String(e?.message || e);
-      setStatus(
-        msg.includes("Receiving end does not exist") || msg.includes("Could not establish connection")
-          ? "扩展后台未就绪：请重载扩展或在 chrome://extensions 中检查 Service Worker。"
-          : msg,
-        true
-      );
-      appendLocalDebugLine("error", "Dify", msg);
-    } finally {
-      runDifyFromFileBtn.disabled = false;
-      await refreshDifyHint();
-      await loadLogs();
-    }
-  });
-}
-
-$("downloadLastRun").addEventListener("click", async () => {
-  try {
-    const format = getExportFormat();
-    const res = await chrome.runtime.sendMessage({ type: "EXPORT_LAST_RUN", format });
-    if (!res?.ok) {
-      setStatus(res?.error || "下载失败", true);
-      return;
-    }
-    setStatus(`已下载（${format === "xlsx" ? "Excel" : "JSON"}）。`);
-    popupTrace("下载上次运行结果", { format });
-  } catch (e) {
-    setStatus(String(e?.message || e), true);
-  }
-});
 
 $("questions").addEventListener(
   "change",
@@ -531,9 +317,7 @@ function setActiveTab(name) {
     tSet.classList.add("active");
     tRun.setAttribute("aria-selected", "false");
     tSet.setAttribute("aria-selected", "true");
-    loadDifySettings()
-      .then(() => refreshDifyHint())
-      .catch(() => {});
+    loadDifySettings().catch(() => {});
     loadLogs();
   } else {
     run.hidden = false;
@@ -542,7 +326,6 @@ function setActiveTab(name) {
     tSet.classList.remove("active");
     tRun.setAttribute("aria-selected", "true");
     tSet.setAttribute("aria-selected", "false");
-    refreshDifyHint().catch(() => {});
   }
 }
 
@@ -552,19 +335,12 @@ function initTabs() {
 }
 
 loadDifySettings()
-  .then(() => refreshDifyHint())
   .then(() => resumeDifyJobIfBackgroundBusy())
   .catch(() => {});
 
 initTabs();
 
-const difyIds = [
-  "difyWorkflowEnabled",
-  "difyBaseUrl",
-  "difyApiKey",
-  "difyApiUser",
-  "difyTargetBrands",
-];
+const difyIds = ["difyBaseUrl", "difyApiKey", "difyApiUser", "difyTargetBrands"];
 for (const id of difyIds) {
   const node = $(id);
   if (!node) continue;
@@ -572,10 +348,7 @@ for (const id of difyIds) {
     persistDifySettings();
     popupTrace("已更新 Dify 设置", { id });
   });
-  if (id !== "difyWorkflowEnabled") {
-    node.addEventListener("blur", () => persistDifySettings());
-  }
+  node.addEventListener("blur", () => persistDifySettings());
 }
 
 loadLogs();
-refreshLastRunHint();

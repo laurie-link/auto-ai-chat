@@ -37,6 +37,18 @@
     else console.log(line);
   }
 
+  /**
+   * @param {HTMLElement} el
+   */
+  function isVisible(el) {
+    if (!(el instanceof HTMLElement)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const st = getComputedStyle(el);
+    if (st.visibility === "hidden" || st.display === "none") return false;
+    return true;
+  }
+
   function isPerplexityPage() {
     return HOSTS.includes(location.hostname);
   }
@@ -67,21 +79,51 @@
   }
 
   /**
-   * 新对话由后台 `tabs.update` 到首页完成；勿在 onMessage 异步里点击「New」，否则整页卸载会导致 sendResponse 丢失。
+   * 与 `#ask-input` 同一条 composer 工具行内的按钮（grid `grid-cols-[1fr_auto]`）；
+   * 发送/停止一般为该行最后一个 `button`（Playwright MCP 实测 www.perplexity.ai）。
    *
-   * MCP：主输入 `#ask-input` 为 `role="textbox"` 的 contenteditable。
+   * @returns {HTMLButtonElement | null}
+   */
+  function findComposerPrimaryButton() {
+    const ask = document.querySelector("#ask-input");
+    if (!ask) return null;
+    let p = ask;
+    for (let i = 0; i < 12 && p; i++) {
+      const buttons = /** @type {HTMLButtonElement[]} */ (
+        [...p.querySelectorAll(":scope button")].filter((b) => b instanceof HTMLButtonElement && isVisible(b))
+      );
+      if (buttons.length >= 2) {
+        return buttons[buttons.length - 1];
+      }
+      p = p.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * 主输入：稳定 id `#ask-input`（role=textbox），与语言无关。
    *
    * @returns {HTMLElement | null}
    */
   function findPromptEditor() {
     const ask = document.querySelector("#ask-input");
-    if (ask instanceof HTMLElement) {
-      const rect = ask.getBoundingClientRect();
-      if (rect.width > 16 && rect.height > 8) return ask;
+    if (ask instanceof HTMLElement && isVisible(ask)) return ask;
+
+    const main = document.querySelector("main");
+    if (!main) return null;
+    const tbs = /** @type {HTMLElement[]} */ ([...main.querySelectorAll('[role="textbox"]')]);
+    let best = /** @type {HTMLElement | null} */ (null);
+    let bestArea = 0;
+    for (const el of tbs) {
+      if (!isVisible(el)) continue;
+      const r = el.getBoundingClientRect();
+      const area = r.width * r.height;
+      if (area > bestArea) {
+        bestArea = area;
+        best = el;
+      }
     }
-    const tb = document.querySelector('[role="textbox"]');
-    if (tb instanceof HTMLElement) return tb;
-    return null;
+    return best;
   }
 
   /**
@@ -101,7 +143,6 @@
     }
 
     if (el.isContentEditable) {
-      // Perplexity 为 React 受控 contenteditable：insertText 已触发 input，再手动 dispatch InputEvent 会导致文案重复（如「你是谁你是谁」）。
       try {
         const sel = window.getSelection();
         sel?.removeAllRanges();
@@ -129,26 +170,41 @@
   }
 
   /**
-   * MCP：有输入后出现 `button[aria-label="Submit"]`。
+   * 发送：composer 行内最后一个主按钮；就绪时需可点（未处于回答完成后的灰显 Submit）。
    *
    * @returns {HTMLElement | null}
    */
   function findSendButton() {
-    const b = document.querySelector('button[aria-label="Submit"]');
-    if (b instanceof HTMLButtonElement && b.disabled) return null;
-    if (b instanceof HTMLElement) return b;
-    const byPartial = Array.from(document.querySelectorAll("button")).find((x) => {
-      const a = (x.getAttribute("aria-label") || "").toLowerCase();
-      return a.includes("submit") && !a.includes("upgrade");
-    });
-    return /** @type {HTMLElement | null} */ (byPartial || null);
+    const b = findComposerPrimaryButton();
+    if (!b || b.disabled) return null;
+    const cls = b.className || "";
+    if (cls.includes("pointer-events-none") && cls.includes("opacity-50")) return null;
+    return b;
   }
 
+  /**
+   * 生成中：不依赖 aria「Stop/停止」。
+   * 完成后主按钮多为 disabled + opacity-50 + pointer-events-none + cursor-default；
+   * 流式中主按钮可点且输入区通常已空；用户正在输入下一题时输入区非空，视为非生成。
+   */
   function isGenerating() {
-    return Array.from(document.querySelectorAll("button")).some((b) => {
-      const a = (b.getAttribute("aria-label") || "").toLowerCase();
-      return a.includes("stop") || a.includes("停止");
-    });
+    const marker = document.querySelector(
+      'main [data-streaming="true"], main [data-testid*="stream" i], main [class*="result-streaming"]'
+    );
+    if (marker instanceof HTMLElement && isVisible(marker)) return true;
+
+    const b = findComposerPrimaryButton();
+    if (!b) return false;
+    const cls = b.className || "";
+    if (b.disabled && cls.includes("opacity-50") && cls.includes("pointer-events-none")) return false;
+
+    const ask = document.querySelector("#ask-input");
+    const typed = (ask && (ask.innerText || ask.textContent || "").trim()) || "";
+    if (typed.length > 0) return false;
+
+    if (cls.includes("opacity-50") && cls.includes("pointer-events-none")) return false;
+    if (cls.includes("cursor-default")) return false;
+    return !b.disabled;
   }
 
   /**
@@ -159,8 +215,6 @@
   }
 
   /**
-   * MCP：回答正文在 `main .prose` 中，多轮时取最后一个。
-   *
    * @returns {HTMLElement[]}
    */
   function collectAssistantRoots() {
@@ -196,12 +250,15 @@
   async function waitForAnswerStable(_userQuestion) {
     const root = /** @type {HTMLElement} */ (findConversationRoot());
 
+    await sleep(900);
     await waitUntil(() => !isGenerating(), 180000, 400);
+    await sleep(600);
 
     let lastText = "";
     let stableTicks = 0;
+    const minStableLen = 12;
 
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 180; i++) {
       await sleep(280);
       const nodes = collectAssistantRoots();
       const last =
@@ -210,7 +267,11 @@
           : null;
       const text = (last?.innerText || "").trim() || (root.innerText || "").trim();
 
-      if (text.length < 1) continue;
+      if (text.length < minStableLen) {
+        stableTicks = 0;
+        lastText = text;
+        continue;
+      }
 
       if (text === lastText) stableTicks += 1;
       else stableTicks = 0;
@@ -248,7 +309,7 @@
 
     await waitForPageReady();
 
-    trace("info", "查找输入框");
+    trace("info", "查找输入框 #ask-input");
     const editor = await waitFor(() => findPromptEditor(), 28000, 200);
     trace("info", "找到输入框", { tag: editor.tagName, id: editor.id });
 
@@ -264,10 +325,10 @@
       }
     }
     if (send) {
-      trace("info", "点击 Submit", { aria: send.getAttribute("aria-label") });
+      trace("info", "点击 composer 主按钮", {});
       send.click();
     } else {
-      trace("warn", "未找到 Submit，尝试 Enter");
+      trace("warn", "未找到可点击主按钮，尝试 Enter");
       editor.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })
       );

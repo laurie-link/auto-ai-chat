@@ -148,7 +148,8 @@ export async function difyRunWorkflowBlocking(
 }
 
 /**
- * 阻塞模式；依次尝试 export_file.type 为 document、custom（与旧版 streaming 重试策略一致）。
+ * 阻塞模式；依次尝试 export_file.type。
+ * JSON 上传在 Dify 侧应对应 custom；document 常用于 PDF 等，会先触发 400 再重试，故优先 custom。
  */
 export async function difyRunWorkflowBlockingWithTypeRetry(
   apiBase,
@@ -157,7 +158,7 @@ export async function difyRunWorkflowBlockingWithTypeRetry(
   uploadFileId,
   targetBrands
 ) {
-  const tryTypes = /** @type {const} */ (["document", "custom"]);
+  const tryTypes = /** @type {const} */ (["custom", "document"]);
   let lastErr = "";
   for (let i = 0; i < tryTypes.length; i++) {
     try {
