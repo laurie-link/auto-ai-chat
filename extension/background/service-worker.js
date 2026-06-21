@@ -1,11 +1,17 @@
 import { appendLog, clearLogs, getLogs } from "../lib/logger.js";
 import {
   buildWorkflowExportJson,
-  difyRunWorkflowBlockingWithTypeRetry,
-  difyUploadFile,
   normalizeDifyApiBase,
   normalizeWorkflowImportJson,
+  runDifyWorkflowBatched,
 } from "../lib/dify-workflow.js";
+import {
+  BRAND_REPORT_CSV_HEADERS,
+  buildStubBrandReportCsv,
+  formatCitationsCell,
+  isoToUsDate,
+  parseBrandReportCsvToResults,
+} from "../lib/brand-report-csv.js";
 import * as XLSX from "../vendor/xlsx.mjs";
 
 /** 与 popup 中 DIFY_DEFAULTS 保持一致，供未写入 storage 时使用 */
@@ -33,6 +39,502 @@ const PERPLEXITY_TAB_URL_PATTERNS = [
 ];
 
 const GOOGLE_SEARCH_CS_FILE = "content/google-search.js";
+const DOM_UTILS_FILE = "content/dom-utils.js";
+const PAGE_KEEPALIVE_FILE = "content/page-keepalive.js";
+
+/** @type {number | null} */
+let collectionTabId = null;
+
+/** @param {string} csFile */
+function injectContentScriptFiles(csFile) {
+  if (csFile === GOOGLE_SEARCH_CS_FILE) return [GOOGLE_SEARCH_CS_FILE];
+  return [DOM_UTILS_FILE, csFile];
+}
+
+/**
+ * 写入 storage，关闭 popup 后重开仍可恢复进度文案。
+ * @param {Record<string, unknown>} partial
+ */
+async function updateRunProgress(partial) {
+  try {
+    const data = await chrome.storage.local.get("runProgress");
+    const prev =
+      data.runProgress && typeof data.runProgress === "object" ? data.runProgress : {};
+    await chrome.storage.local.set({
+      runProgress: {
+        ...prev,
+        ...partial,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/** @type {boolean} */
+let collectionAbortRequested = false;
+/** @type {boolean} */
+let difyAbortRequested = false;
+/** @type {boolean} */
+let collectionInProgress = false;
+/** 防止并发执行 Dify 任务 */
+let difyJsonJobBusy = false;
+/** 多平台连续任务中（内层队列不单独 begin/end） */
+let multiRunActive = false;
+
+const MULTI_PLATFORM_STEPS = [
+  { id: "gemini", label: "Gemini", run: (q) => runGeminiQueue(q) },
+  { id: "chatgpt", label: "ChatGPT", run: (q) => runChatGPTQueue(q) },
+  { id: "perplexity", label: "Perplexity", run: (q) => runPerplexityQueue(q) },
+];
+
+function beginCollectionJobIfNeeded() {
+  if (!multiRunActive) beginCollectionJob();
+}
+
+function endCollectionJobIfNeeded() {
+  if (!multiRunActive) endCollectionJob();
+}
+
+function beginCollectionJob() {
+  collectionAbortRequested = false;
+  difyAbortRequested = false;
+  collectionInProgress = true;
+}
+
+function endCollectionJob() {
+  collectionInProgress = false;
+  collectionAbortRequested = false;
+  void releaseCollectionTab();
+}
+
+/**
+ * MAIN world 注入 page-keepalive，避免后台标签被 ChatGPT/Gemini 暂停。
+ * @param {number} tabId
+ */
+async function injectPageKeepalive(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: [PAGE_KEEPALIVE_FILE],
+      world: "MAIN",
+    });
+  } catch (e) {
+    await trace("warn", "background", "injectPageKeepalive 失败", String(e));
+  }
+}
+
+/**
+ * 采集期间禁止 Chrome 丢弃标签，并注入后台保活脚本。
+ * @param {number} tabId
+ */
+async function keepCollectionTabAlive(tabId) {
+  collectionTabId = tabId;
+  try {
+    await chrome.tabs.update(tabId, { autoDiscardable: false });
+  } catch (_) {
+    /* ignore */
+  }
+  await injectPageKeepalive(tabId);
+}
+
+/** 采集结束，恢复标签可被自动丢弃 */
+async function releaseCollectionTab(tabId) {
+  const id = tabId ?? collectionTabId;
+  collectionTabId = null;
+  if (id == null) return;
+  try {
+    await chrome.tabs.update(id, { autoDiscardable: true });
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/**
+ * @param {object[]} results
+ * @param {string} site
+ * @param {string} label
+ * @param {number} total
+ */
+async function handleCollectionCancelled(results, site, label, total) {
+  const n = results.length;
+  if (n > 0) {
+    const at = new Date().toISOString();
+    await chrome.storage.local.set({
+      lastRun: { site, completedAt: at, results, cancelled: true, inProgress: false },
+      lastRunError: null,
+    });
+    await downloadStubCsvIfPossible(buildWorkflowExportJson(results, site));
+  }
+  const message =
+    n > 0
+      ? `已停止 · ${label} · 已下载 ${n}/${total} 条 CSV`
+      : `已停止 · ${label} · 尚无已采集数据`;
+  await updateRunProgress({ status: "done", current: n, total, message });
+  await trace("info", "background", "采集已用户停止", { site, n, total });
+  return { ok: true, cancelled: true, results };
+}
+
+/**
+ * @param {object[]} results
+ * @param {string} site
+ * @param {string} label
+ * @param {number} total
+ */
+async function abortCollectionIfRequested(results, site, label, total) {
+  if (!collectionAbortRequested) return null;
+  return handleCollectionCancelled(results, site, label, total);
+}
+
+/** 采集超时等可刷新页面重试的错误 */
+function isRetryableCollectionError(error) {
+  const err = String(error || "");
+  return (
+    err.includes("等待条件超时") ||
+    err.includes("等待元素超时") ||
+    isTransientSendError({ error: err })
+  );
+}
+
+/**
+ * 刷新标签页并重新注入内容脚本。
+ * @param {number} tabId
+ * @param {string} csFile
+ * @param {{ settleMs?: number, injectAllFrames?: boolean }} [opts]
+ */
+async function reloadTabAndReinject(tabId, csFile, opts = {}) {
+  await chrome.tabs.reload(tabId);
+  await waitTabSettled(tabId, opts.settleMs ?? 1400);
+  await injectPageKeepalive(tabId);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, ...(opts.injectAllFrames !== false ? { allFrames: true } : {}) },
+      files: injectContentScriptFiles(csFile),
+    });
+    await sleep(350);
+  } catch (e) {
+    await trace("warn", "background", "刷新后注入内容脚本失败", String(e));
+  }
+}
+
+/**
+ * 发送单题消息；失败且可重试时刷新页面，最多 maxAttempts 次。
+ * @param {number} tabId
+ * @param {object} message
+ * @param {string} csFile
+ * @param {{ maxAttempts?: number, injectAllFrames?: boolean, mainFrameOnly?: boolean, onBeforeRetry?: (tabId: number, attempt: number) => Promise<void> }} [opts]
+ */
+async function sendQuestionWithPageRetry(tabId, message, csFile, opts = {}) {
+  const maxAttempts = opts.maxAttempts ?? 3;
+  let lastRes = /** @type {{ ok?: boolean, error?: string }} */ ({
+    ok: false,
+    error: "内容脚本无响应",
+  });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      await trace("warn", "background", `刷新页面重试 ${attempt}/${maxAttempts}`, {
+        error: lastRes?.error,
+      });
+      if (typeof opts.onRetryProgress === "function") {
+        await opts.onRetryProgress(attempt, maxAttempts, lastRes?.error);
+      }
+      if (typeof opts.onBeforeRetry === "function") {
+        await opts.onBeforeRetry(tabId, attempt);
+      } else {
+        await reloadTabAndReinject(tabId, csFile, opts);
+      }
+    }
+
+    lastRes = await sendToTabWithRetry(tabId, message, csFile, opts);
+    if (lastRes?.ok) return lastRes;
+    if (!isRetryableCollectionError(lastRes?.error) || attempt >= maxAttempts) break;
+  }
+  return lastRes;
+}
+
+/**
+ * 单题失败：保存已完成进度、自动下载占位 CSV，并返回含进度的错误信息。
+ * @param {object} ctx
+ */
+async function handlePartialCollectionFailure(ctx) {
+  const {
+    results,
+    site,
+    label,
+    total,
+    failedIndex,
+    question,
+    error,
+    tabId,
+    tabUrl,
+    phase,
+  } = ctx;
+
+  const completed = results.length;
+  const failedNum = failedIndex + 1;
+  const errText = String(error || "未知错误");
+  const qRaw = String(question || "").trim();
+  const qShort = qRaw.length > 55 ? `${qRaw.slice(0, 55)}…` : qRaw;
+
+  await trace("error", "background", `${label} 第 ${failedNum}/${total} 题失败`, {
+    error: errText,
+    completed,
+  });
+  await recordRunError({
+    phase: phase || "RUN_QUESTION",
+    step: `${failedNum}/${total}`,
+    tabId,
+    tabUrl,
+    error: errText,
+    completed,
+    question: qRaw.slice(0, 200),
+  });
+
+  let downloadNote = "";
+  if (completed > 0) {
+    const at = new Date().toISOString();
+    await chrome.storage.local.set({
+      lastRun: {
+        site,
+        completedAt: at,
+        results,
+        partial: true,
+        inProgress: false,
+        failedAt: failedNum,
+        failedQuestion: qRaw,
+      },
+      lastRunError: {
+        at,
+        phase: String(phase || ""),
+        step: `${failedNum}/${total}`,
+        error: errText,
+        completed,
+      },
+    });
+    await downloadStubCsvIfPossible(buildWorkflowExportJson(results, site));
+    downloadNote = ` · 已自动下载 ${completed}/${total} 条进度 CSV`;
+  } else {
+    downloadNote = " · 尚无已完成题目";
+  }
+
+  const message = `${label} · 第 ${failedNum}/${total} 题失败（${errText}）${qShort ? `「${qShort}」` : ""} · 已完成 ${completed} 题${downloadNote}`;
+
+  await updateRunProgress({
+    status: "error",
+    current: failedNum,
+    total,
+    message,
+  });
+
+  return {
+    ok: false,
+    error: message,
+    results,
+    partial: true,
+    completed,
+    failedAt: failedNum,
+  };
+}
+
+/**
+ * 采集开始：标记 inProgress，便于扩展重载后识别中断任务。
+ * @param {string} site
+ * @param {number} total
+ */
+async function markCollectionStarted(site, total) {
+  const at = new Date().toISOString();
+  await chrome.storage.local.set({
+    lastRun: {
+      site,
+      completedAt: at,
+      results: [],
+      inProgress: true,
+      partial: true,
+      current: 0,
+      total,
+    },
+  });
+}
+
+/**
+ * 每完成一题写入 storage，扩展重载时不丢已完成进度。
+ * @param {object[]} results
+ * @param {string} site
+ * @param {{ current?: number, total?: number }} [meta]
+ */
+async function persistPartialRun(results, site, meta = {}) {
+  if (!Array.isArray(results) || results.length === 0) return;
+  const at = new Date().toISOString();
+  await chrome.storage.local.set({
+    lastRun: {
+      site: site || "unknown",
+      completedAt: at,
+      results,
+      partial: true,
+      inProgress: true,
+      current: meta.current ?? results.length,
+      total: meta.total ?? results.length,
+    },
+  });
+}
+
+/**
+ * @param {string} [message]
+ */
+async function finalizeJobStop(message) {
+  collectionAbortRequested = false;
+  difyAbortRequested = false;
+  collectionInProgress = false;
+  difyJsonJobBusy = false;
+  try {
+    await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
+  } catch {
+    /* ignore */
+  }
+  if (message) {
+    await updateRunProgress({ status: "done", message });
+  }
+}
+
+/** Service Worker 冷启动后 storage 里的 running 已不可信，需清理 */
+async function reconcileStaleJobStateOnStartup() {
+  try {
+    const data = await chrome.storage.local.get([
+      "runProgress",
+      "difyWorkflowRunInProgress",
+      "lastRun",
+      "lastDifyRun",
+    ]);
+    const stale =
+      data.runProgress?.status === "running" || Boolean(data.difyWorkflowRunInProgress);
+    if (!stale) return;
+
+    const lastRun = data.lastRun;
+    const lastDify = data.lastDifyRun;
+    const runProgress = data.runProgress;
+    const hasResults = Array.isArray(lastRun?.results) && lastRun.results.length > 0;
+    const n = hasResults ? lastRun.results.length : 0;
+    const total = lastRun?.total ?? runProgress?.total ?? n;
+    const interruptedCollection =
+      Boolean(lastRun?.inProgress) || runProgress?.status === "running";
+
+    const runAt = String(lastRun?.completedAt || "");
+    const difyAt = String(lastDify?.at || "");
+    const needsDifyStub =
+      hasResults &&
+      !lastRun?.inProgress &&
+      (!lastDify?.ok || (runAt && (!difyAt || difyAt < runAt)));
+
+    const needsProgressCsv = interruptedCollection && hasResults;
+
+    if (needsProgressCsv || needsDifyStub) {
+      await downloadStubCsvIfPossible(
+        buildWorkflowExportJson(lastRun.results, String(lastRun.site || "unknown"))
+      );
+      await trace("info", "background", "中断恢复：已下载采集占位 CSV", {
+        rows: n,
+        interruptedCollection,
+        needsDifyStub,
+      });
+    }
+
+    let message;
+    if (needsProgressCsv) {
+      message = `上次采集中断（扩展已重载）· 已完成 ${n}/${total} 题 · 已下载进度 CSV`;
+    } else if (needsDifyStub) {
+      message = "上次 Dify 未完成 · 已下载采集占位 CSV，可上传补跑";
+    } else {
+      message = "上次任务已中断（扩展已重载），可重新开始";
+    }
+
+    await finalizeJobStop(message);
+    await trace("warn", "background", "已清理陈旧 running 状态");
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * @returns {Promise<{ ok: boolean, isActive: boolean, collectionInProgress: boolean, difyBusy: boolean, runProgress?: object }>}
+ */
+async function getJobState() {
+  const data = await chrome.storage.local.get(["runProgress", "difyWorkflowRunInProgress"]);
+  const storageRunning =
+    data.runProgress?.status === "running" || Boolean(data.difyWorkflowRunInProgress);
+  const isActive = collectionInProgress || difyJsonJobBusy || storageRunning;
+  return {
+    ok: true,
+    isActive,
+    collectionInProgress,
+    difyBusy: difyJsonJobBusy,
+    difyWorkflowRunInProgress: Boolean(data.difyWorkflowRunInProgress),
+    runProgress: data.runProgress || null,
+  };
+}
+
+/**
+ * @returns {Promise<{ ok: boolean, message?: string, error?: string }>}
+ */
+async function stopCurrentJob() {
+  if (collectionInProgress) {
+    collectionAbortRequested = true;
+    return { ok: true, message: "正在停止采集…" };
+  }
+
+  const data = await chrome.storage.local.get(["difyWorkflowRunInProgress", "runProgress", "lastRun"]);
+  if (difyJsonJobBusy || data.difyWorkflowRunInProgress) {
+    difyAbortRequested = true;
+    return { ok: true, message: "正在停止 Dify…" };
+  }
+
+  if (data.runProgress?.status === "running") {
+    if (Array.isArray(data.lastRun?.results) && data.lastRun.results.length > 0) {
+      await downloadStubCsvIfPossible(
+        buildWorkflowExportJson(
+          data.lastRun.results,
+          String(data.lastRun.site || "unknown")
+        )
+      );
+    }
+    await finalizeJobStop("已停止（已清理陈旧任务状态）");
+    return { ok: true, message: "已清理陈旧任务状态" };
+  }
+
+  return { ok: false, error: "当前没有进行中的任务" };
+}
+
+function initSidePanel() {
+  if (!chrome.sidePanel?.setPanelBehavior) return;
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+}
+
+initSidePanel();
+chrome.runtime.onInstalled.addListener(() => initSidePanel());
+void reconcileStaleJobStateOnStartup();
+
+/**
+ * Dify 失败时下载与成功时同表头的占位 CSV（LLM 列为空）。
+ * @param {object} payloadObject
+ */
+async function downloadStubCsvIfPossible(payloadObject) {
+  const results = Array.isArray(payloadObject?.results) ? payloadObject.results : [];
+  if (results.length === 0) return;
+  try {
+    const site =
+      typeof payloadObject.site === "string" && payloadObject.site
+        ? payloadObject.site
+        : "unknown";
+    const stub = buildStubBrandReportCsv(results, site);
+    await downloadCsvText(stub, "Brand_Visibility_Report");
+    await trace("info", "background", "已下载占位 CSV（Dify 未成功，LLM 列为空）", {
+      rows: results.length,
+    });
+  } catch (e) {
+    await trace("warn", "background", "占位 CSV 下载失败", String(e));
+  }
+}
 
 /**
  * AI Mode：公开资料中常见 `udm=50`；若你所在地区/账号下参数不同，可用 Playwright MCP 打开目标页对比地址栏后改此常量。
@@ -51,6 +553,29 @@ function buildGoogleSearchUrl(question, mode) {
 }
 
 /**
+ * @param {number} tabId
+ * @param {string} url
+ */
+async function prepareGoogleSearchTab(tabId, url) {
+  await chrome.tabs.update(tabId, { url });
+  await waitTabComplete(tabId);
+  await waitUntilTabUrlMatches(tabId, (u) => {
+    const s = u || "";
+    return /\.google\./.test(s) && /\/search\?/.test(s);
+  });
+  await sleep(4500);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [GOOGLE_SEARCH_CS_FILE],
+    });
+    await sleep(750);
+  } catch (e) {
+    await trace("warn", "background", "Google executeScript", String(e));
+  }
+}
+
+/**
  * Perplexity 侧点击「New」会整页跳转，内容脚本若在 onMessage 异步流程里点击，页面卸载导致
  * sendResponse 永远调不到（message channel closed）。新对话改为后台先导航到首页再发消息。
  *
@@ -61,10 +586,11 @@ async function navigatePerplexityHomeAndInject(tabId) {
   await chrome.tabs.update(tabId, { url: PERPLEXITY_HOME });
   await waitTabComplete(tabId);
   await sleep(1500);
+  await injectPageKeepalive(tabId);
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: [PERPLEXITY_CS_FILE],
+      files: injectContentScriptFiles(PERPLEXITY_CS_FILE),
     });
     await sleep(350);
   } catch (e) {
@@ -122,6 +648,15 @@ async function runGeminiQueue(questions) {
     preview: filtered[0]?.slice(0, 80),
   });
 
+  await updateRunProgress({
+    status: "running",
+    site: "gemini",
+    label: "Gemini",
+    current: 0,
+    total: filtered.length,
+    message: "正在准备 Gemini 标签页…",
+  });
+
   let tab;
   try {
     tab = await ensureGeminiTab();
@@ -132,12 +667,17 @@ async function runGeminiQueue(questions) {
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabSettled(tab.id, 1400);
+  await waitTabSettled(tab.id, 600);
+  await keepCollectionTabAlive(tab.id);
+
+  await updateRunProgress({
+    message: `Gemini · 开始采集，共 ${filtered.length} 题…`,
+  });
 
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
-      files: [GEMINI_CS_FILE],
+      files: injectContentScriptFiles(GEMINI_CS_FILE),
     });
     await trace("info", "background", "预注入内容脚本 all_frames（避免 Receiving end）", {
       tabId: tab.id,
@@ -148,13 +688,24 @@ async function runGeminiQueue(questions) {
   }
 
   const results = [];
+  beginCollectionJobIfNeeded();
+  try {
+  await markCollectionStarted("gemini", filtered.length);
   for (let i = 0; i < filtered.length; i++) {
+    const early = await abortCollectionIfRequested(results, "gemini", "Gemini", filtered.length);
+    if (early) return early;
+
     const question = filtered[i];
+    await updateRunProgress({
+      current: i + 1,
+      total: filtered.length,
+      message: `Gemini · 第 ${i + 1}/${filtered.length} 题…`,
+    });
     await trace("info", "background", `发送第 ${i + 1}/${filtered.length} 题`, {
       len: question.length,
     });
 
-    const res = await sendToTabWithRetry(
+    const res = await sendQuestionWithPageRetry(
       tab.id,
       {
         type: "GEMINI_RUN_QUESTION",
@@ -165,26 +716,29 @@ async function runGeminiQueue(questions) {
           newChat: true,
         },
       },
-      GEMINI_CS_FILE
+      GEMINI_CS_FILE,
+      {
+        onRetryProgress: async (attempt, max) => {
+          await updateRunProgress({
+            message: `Gemini · 第 ${i + 1}/${filtered.length} 题超时，刷新重试 (${attempt}/${max})…`,
+          });
+        },
+      }
     );
 
     if (!res?.ok) {
-      await trace("error", "background", "内容脚本返回失败", {
-        error: res?.error || "无 error 字段",
-        raw: res,
-      });
-      await recordRunError({
-        phase: "GEMINI_RUN_QUESTION",
-        step: `${i + 1}/${filtered.length}`,
+      return handlePartialCollectionFailure({
+        results,
+        site: "gemini",
+        label: "Gemini",
+        total: filtered.length,
+        failedIndex: i,
+        question,
+        error: res?.error || "内容脚本无响应",
         tabId: tab.id,
         tabUrl: tab.url || "",
-        error: res?.error || "内容脚本无响应",
+        phase: "GEMINI_RUN_QUESTION",
       });
-      return {
-        ok: false,
-        error: res?.error || "内容脚本无响应",
-        results,
-      };
     }
 
     await trace("info", "background", `第 ${i + 1} 题完成`, {
@@ -200,6 +754,10 @@ async function runGeminiQueue(questions) {
       pageUrl: res.pageUrl || "",
       capturedAt: new Date().toISOString(),
     });
+    await persistPartialRun(results, "gemini", { current: i + 1, total: filtered.length });
+
+    const after = await abortCollectionIfRequested(results, "gemini", "Gemini", filtered.length);
+    if (after) return after;
   }
 
   try {
@@ -215,8 +773,17 @@ async function runGeminiQueue(questions) {
     return { ok: false, error: `保存失败: ${e}`, results };
   }
 
-  await trace("info", "background", "runGeminiQueue 全部成功", { n: results.length });
-  return { ok: true, results };
+  const difyScheduled = await finishCollectionPhase(
+    results,
+    "gemini",
+    "Gemini",
+    filtered.length
+  );
+  await trace("info", "background", "runGeminiQueue 全部成功", { n: results.length, difyScheduled });
+  return { ok: true, results, difyScheduled };
+  } finally {
+    endCollectionJobIfNeeded();
+  }
 }
 
 /**
@@ -235,6 +802,15 @@ async function runChatGPTQueue(questions) {
     preview: filtered[0]?.slice(0, 80),
   });
 
+  await updateRunProgress({
+    status: "running",
+    site: "chatgpt",
+    label: "ChatGPT",
+    current: 0,
+    total: filtered.length,
+    message: "正在准备 ChatGPT 标签页…",
+  });
+
   let tab;
   try {
     tab = await ensureChatGPTTab();
@@ -245,12 +821,17 @@ async function runChatGPTQueue(questions) {
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabSettled(tab.id, 1600);
+  await waitTabSettled(tab.id, 700);
+  await keepCollectionTabAlive(tab.id);
+
+  await updateRunProgress({
+    message: `ChatGPT · 开始采集，共 ${filtered.length} 题…`,
+  });
 
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
-      files: [CHATGPT_CS_FILE],
+      files: injectContentScriptFiles(CHATGPT_CS_FILE),
     });
     await trace("info", "background", "预注入 ChatGPT 内容脚本 all_frames", { tabId: tab.id });
     await sleep(250);
@@ -259,13 +840,24 @@ async function runChatGPTQueue(questions) {
   }
 
   const results = [];
+  beginCollectionJobIfNeeded();
+  try {
+  await markCollectionStarted("chatgpt", filtered.length);
   for (let i = 0; i < filtered.length; i++) {
+    const early = await abortCollectionIfRequested(results, "chatgpt", "ChatGPT", filtered.length);
+    if (early) return early;
+
     const question = filtered[i];
+    await updateRunProgress({
+      current: i + 1,
+      total: filtered.length,
+      message: `ChatGPT · 第 ${i + 1}/${filtered.length} 题…`,
+    });
     await trace("info", "background", `ChatGPT 发送第 ${i + 1}/${filtered.length} 题`, {
       len: question.length,
     });
 
-    const res = await sendToTabWithRetry(
+    const res = await sendQuestionWithPageRetry(
       tab.id,
       {
         type: "CHATGPT_RUN_QUESTION",
@@ -276,26 +868,29 @@ async function runChatGPTQueue(questions) {
           newChat: true,
         },
       },
-      CHATGPT_CS_FILE
+      CHATGPT_CS_FILE,
+      {
+        onRetryProgress: async (attempt, max) => {
+          await updateRunProgress({
+            message: `ChatGPT · 第 ${i + 1}/${filtered.length} 题超时，刷新重试 (${attempt}/${max})…`,
+          });
+        },
+      }
     );
 
     if (!res?.ok) {
-      await trace("error", "background", "ChatGPT 内容脚本返回失败", {
-        error: res?.error || "无 error 字段",
-        raw: res,
-      });
-      await recordRunError({
-        phase: "CHATGPT_RUN_QUESTION",
-        step: `${i + 1}/${filtered.length}`,
+      return handlePartialCollectionFailure({
+        results,
+        site: "chatgpt",
+        label: "ChatGPT",
+        total: filtered.length,
+        failedIndex: i,
+        question,
+        error: res?.error || "内容脚本无响应",
         tabId: tab.id,
         tabUrl: tab.url || "",
-        error: res?.error || "内容脚本无响应",
+        phase: "CHATGPT_RUN_QUESTION",
       });
-      return {
-        ok: false,
-        error: res?.error || "内容脚本无响应",
-        results,
-      };
     }
 
     await trace("info", "background", `ChatGPT 第 ${i + 1} 题完成`, {
@@ -311,6 +906,10 @@ async function runChatGPTQueue(questions) {
       pageUrl: res.pageUrl || "",
       capturedAt: new Date().toISOString(),
     });
+    await persistPartialRun(results, "chatgpt", { current: i + 1, total: filtered.length });
+
+    const after = await abortCollectionIfRequested(results, "chatgpt", "ChatGPT", filtered.length);
+    if (after) return after;
   }
 
   try {
@@ -326,8 +925,17 @@ async function runChatGPTQueue(questions) {
     return { ok: false, error: `保存失败: ${e}`, results };
   }
 
-  await trace("info", "background", "runChatGPTQueue 全部成功", { n: results.length });
-  return { ok: true, results };
+  const difyScheduled = await finishCollectionPhase(
+    results,
+    "chatgpt",
+    "ChatGPT",
+    filtered.length
+  );
+  await trace("info", "background", "runChatGPTQueue 全部成功", { n: results.length, difyScheduled });
+  return { ok: true, results, difyScheduled };
+  } finally {
+    endCollectionJobIfNeeded();
+  }
 }
 
 /**
@@ -346,6 +954,15 @@ async function runPerplexityQueue(questions) {
     preview: filtered[0]?.slice(0, 80),
   });
 
+  await updateRunProgress({
+    status: "running",
+    site: "perplexity",
+    label: "Perplexity",
+    current: 0,
+    total: filtered.length,
+    message: "正在准备 Perplexity 标签页…",
+  });
+
   let tab;
   try {
     tab = await ensurePerplexityTab();
@@ -356,18 +973,39 @@ async function runPerplexityQueue(questions) {
   }
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
-  await waitTabSettled(tab.id, 900);
+  await waitTabSettled(tab.id, 400);
+  await keepCollectionTabAlive(tab.id);
+
+  await updateRunProgress({
+    message: `Perplexity · 开始采集，共 ${filtered.length} 题…`,
+  });
 
   const results = [];
+  beginCollectionJobIfNeeded();
+  try {
+  await markCollectionStarted("perplexity", filtered.length);
   for (let i = 0; i < filtered.length; i++) {
+    const early = await abortCollectionIfRequested(
+      results,
+      "perplexity",
+      "Perplexity",
+      filtered.length
+    );
+    if (early) return early;
+
     const question = filtered[i];
+    await updateRunProgress({
+      current: i + 1,
+      total: filtered.length,
+      message: `Perplexity · 第 ${i + 1}/${filtered.length} 题…`,
+    });
     await trace("info", "background", `Perplexity 发送第 ${i + 1}/${filtered.length} 题`, {
       len: question.length,
     });
 
     await navigatePerplexityHomeAndInject(tab.id);
 
-    const res = await sendToTabWithRetry(
+    const res = await sendQuestionWithPageRetry(
       tab.id,
       {
         type: "PERPLEXITY_RUN_QUESTION",
@@ -378,26 +1016,29 @@ async function runPerplexityQueue(questions) {
           newChat: false,
         },
       },
-      PERPLEXITY_CS_FILE
+      PERPLEXITY_CS_FILE,
+      {
+        onRetryProgress: async (attempt, max) => {
+          await updateRunProgress({
+            message: `Perplexity · 第 ${i + 1}/${filtered.length} 题超时，刷新重试 (${attempt}/${max})…`,
+          });
+        },
+      }
     );
 
     if (!res?.ok) {
-      await trace("error", "background", "Perplexity 内容脚本返回失败", {
-        error: res?.error || "无 error 字段",
-        raw: res,
-      });
-      await recordRunError({
-        phase: "PERPLEXITY_RUN_QUESTION",
-        step: `${i + 1}/${filtered.length}`,
+      return handlePartialCollectionFailure({
+        results,
+        site: "perplexity",
+        label: "Perplexity",
+        total: filtered.length,
+        failedIndex: i,
+        question,
+        error: res?.error || "内容脚本无响应",
         tabId: tab.id,
         tabUrl: tab.url || "",
-        error: res?.error || "内容脚本无响应",
+        phase: "PERPLEXITY_RUN_QUESTION",
       });
-      return {
-        ok: false,
-        error: res?.error || "内容脚本无响应",
-        results,
-      };
     }
 
     await trace("info", "background", `Perplexity 第 ${i + 1} 题完成`, {
@@ -413,6 +1054,15 @@ async function runPerplexityQueue(questions) {
       pageUrl: res.pageUrl || "",
       capturedAt: new Date().toISOString(),
     });
+    await persistPartialRun(results, "perplexity", { current: i + 1, total: filtered.length });
+
+    const after = await abortCollectionIfRequested(
+      results,
+      "perplexity",
+      "Perplexity",
+      filtered.length
+    );
+    if (after) return after;
   }
 
   try {
@@ -428,8 +1078,150 @@ async function runPerplexityQueue(questions) {
     return { ok: false, error: `保存失败: ${e}`, results };
   }
 
-  await trace("info", "background", "runPerplexityQueue 全部成功", { n: results.length });
-  return { ok: true, results };
+  const difyScheduled = await finishCollectionPhase(
+    results,
+    "perplexity",
+    "Perplexity",
+    filtered.length
+  );
+  await trace("info", "background", "runPerplexityQueue 全部成功", { n: results.length, difyScheduled });
+  return { ok: true, results, difyScheduled };
+  } finally {
+    endCollectionJobIfNeeded();
+  }
+}
+
+/**
+ * @param {number} [maxMs]
+ */
+async function waitForDifyJobIdle(maxMs = 7200000) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (collectionAbortRequested || difyAbortRequested) {
+      return { ok: false, cancelled: true };
+    }
+    if (!difyJsonJobBusy) {
+      const data = await chrome.storage.local.get(["difyWorkflowRunInProgress"]);
+      if (!data.difyWorkflowRunInProgress) return { ok: true };
+    }
+    await sleep(800);
+  }
+  return { ok: false, error: "等待 Dify 超时" };
+}
+
+/**
+ * 按固定顺序连续运行多个平台：Gemini → ChatGPT → Perplexity。
+ * @param {string[]} questions
+ * @param {string[]} platformIds
+ */
+async function runMultiPlatformQueue(questions, platformIds) {
+  const idSet = new Set(platformIds.map((p) => String(p).trim()).filter(Boolean));
+  const plan = MULTI_PLATFORM_STEPS.filter((step) => idSet.has(step.id));
+  if (plan.length === 0) {
+    return { ok: false, error: "请至少选择一个平台" };
+  }
+
+  multiRunActive = true;
+  beginCollectionJob();
+  /** @type {object[]} */
+  const summary = [];
+
+  try {
+    const chainLabel = plan.map((p) => p.label).join(" → ");
+    await updateRunProgress({
+      status: "running",
+      site: "multi",
+      label: "多平台",
+      current: 0,
+      total: plan.length,
+      message: `多平台任务 · ${chainLabel}`,
+    });
+    await trace("info", "background", "runMultiPlatformQueue 开始", {
+      platforms: plan.map((p) => p.id),
+      count: questions.length,
+    });
+
+    for (let i = 0; i < plan.length; i++) {
+      const step = plan[i];
+      if (collectionAbortRequested) {
+        await updateRunProgress({
+          status: "done",
+          message: `已停止 · 多平台 · 已完成 ${i}/${plan.length} 个平台`,
+        });
+        return { ok: true, cancelled: true, summary };
+      }
+
+      await updateRunProgress({
+        current: i + 1,
+        total: plan.length,
+        message: `多平台 (${i + 1}/${plan.length}) · 正在运行 ${step.label}…`,
+      });
+
+      const result = await step.run(questions);
+      summary.push({
+        platform: step.id,
+        label: step.label,
+        ok: Boolean(result?.ok),
+        n: result?.results?.length ?? 0,
+        difyScheduled: Boolean(result?.difyScheduled),
+        error: result?.error,
+        cancelled: Boolean(result?.cancelled),
+      });
+
+      if (result?.cancelled) {
+        return { ok: true, cancelled: true, summary };
+      }
+      if (!result?.ok) {
+        const errText = String(result?.error || "未知错误");
+        await updateRunProgress({
+          status: "error",
+          message: `${step.label} 失败：${errText}`,
+        });
+        return {
+          ok: false,
+          error: `${step.label} 失败：${errText}`,
+          failedPlatform: step.id,
+          summary,
+        };
+      }
+
+      if (result.difyScheduled) {
+        await updateRunProgress({
+          message: `多平台 (${i + 1}/${plan.length}) · ${step.label} 完成，等待 Dify…`,
+        });
+        const difyWait = await waitForDifyJobIdle();
+        if (difyWait.cancelled) {
+          return { ok: true, cancelled: true, summary };
+        }
+        if (!difyWait.ok) {
+          await updateRunProgress({
+            status: "error",
+            message: `${step.label} 后 Dify 未完成：${difyWait.error || "超时"}`,
+          });
+          return {
+            ok: false,
+            error: `${step.label} 后 Dify 未完成：${difyWait.error || "超时"}`,
+            summary,
+          };
+        }
+      }
+    }
+
+    await updateRunProgress({
+      status: "done",
+      message: `全部完成 · ${chainLabel}`,
+    });
+    await trace("info", "background", "runMultiPlatformQueue 全部成功", { summary });
+    return { ok: true, summary, platforms: plan.map((p) => p.id) };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    await trace("error", "background", "runMultiPlatformQueue 异常", msg);
+    await updateRunProgress({ status: "error", message: msg });
+    return { ok: false, error: msg, summary };
+  } finally {
+    multiRunActive = false;
+    endCollectionJob();
+  }
 }
 
 /**
@@ -462,34 +1254,31 @@ async function runGoogleSearchQueue(questions, mode) {
 
   await trace("info", "background", "标签页就绪", { tabId: tab.id, url: tab.url || "" });
   await waitTabSettled(tab.id, 600);
+  await keepCollectionTabAlive(tab.id);
 
+  const googleLabel = mode === "aimode" ? "AI Mode" : "AIO";
   const results = [];
+  beginCollectionJobIfNeeded();
+  try {
+  await markCollectionStarted(site, filtered.length);
   for (let i = 0; i < filtered.length; i++) {
+    const early = await abortCollectionIfRequested(results, site, googleLabel, filtered.length);
+    if (early) return early;
+
     const question = filtered[i];
     const url = buildGoogleSearchUrl(question, mode);
+    await updateRunProgress({
+      current: i + 1,
+      total: filtered.length,
+      message: `${googleLabel} · 第 ${i + 1}/${filtered.length} 题…`,
+    });
     await trace("info", "background", `Google ${mode} 第 ${i + 1}/${filtered.length} 题`, {
       len: question.length,
     });
 
-    await chrome.tabs.update(tab.id, { url });
-    await waitTabComplete(tab.id);
-    await waitUntilTabUrlMatches(tab.id, (u) => {
-      const s = u || "";
-      return /\.google\./.test(s) && /\/search\?/.test(s);
-    });
-    await sleep(4500);
+    await prepareGoogleSearchTab(tab.id, url);
 
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: [GOOGLE_SEARCH_CS_FILE],
-      });
-      await sleep(750);
-    } catch (e) {
-      await trace("warn", "background", "Google executeScript", String(e));
-    }
-
-    const res = await sendToTabWithRetry(
+    const res = await sendQuestionWithPageRetry(
       tab.id,
       {
         type: "GOOGLE_SEARCH_RUN",
@@ -501,26 +1290,33 @@ async function runGoogleSearchQueue(questions, mode) {
         },
       },
       GOOGLE_SEARCH_CS_FILE,
-      { mainFrameOnly: true, injectAllFrames: false }
+      {
+        mainFrameOnly: true,
+        injectAllFrames: false,
+        onRetryProgress: async (attempt, max) => {
+          await updateRunProgress({
+            message: `${googleLabel} · 第 ${i + 1}/${filtered.length} 题超时，刷新重试 (${attempt}/${max})…`,
+          });
+        },
+        onBeforeRetry: async (tabId) => {
+          await prepareGoogleSearchTab(tabId, url);
+        },
+      }
     );
 
     if (!res?.ok) {
-      await trace("error", "background", "Google 内容脚本返回失败", {
-        error: res?.error || "无 error 字段",
-        raw: res,
-      });
-      await recordRunError({
-        phase: "GOOGLE_SEARCH_RUN",
-        step: `${i + 1}/${filtered.length}`,
+      return handlePartialCollectionFailure({
+        results,
+        site,
+        label: googleLabel,
+        total: filtered.length,
+        failedIndex: i,
+        question,
+        error: res?.error || "内容脚本无响应",
         tabId: tab.id,
         tabUrl: tab.url || "",
-        error: res?.error || "内容脚本无响应",
+        phase: "GOOGLE_SEARCH_RUN",
       });
-      return {
-        ok: false,
-        error: res?.error || "内容脚本无响应",
-        results,
-      };
     }
 
     await trace("info", "background", `Google ${mode} 第 ${i + 1} 题完成`, {
@@ -538,6 +1334,10 @@ async function runGoogleSearchQueue(questions, mode) {
       ...(res.aioPresent !== undefined ? { aioPresent: res.aioPresent } : {}),
       ...(res.note ? { note: res.note } : {}),
     });
+    await persistPartialRun(results, site, { current: i + 1, total: filtered.length });
+
+    const after = await abortCollectionIfRequested(results, site, googleLabel, filtered.length);
+    if (after) return after;
   }
 
   try {
@@ -553,8 +1353,21 @@ async function runGoogleSearchQueue(questions, mode) {
     return { ok: false, error: `保存失败: ${e}`, results };
   }
 
-  await trace("info", "background", "runGoogleSearchQueue 全部成功", { n: results.length, mode });
-  return { ok: true, results };
+  const difyScheduled = await finishCollectionPhase(
+    results,
+    site,
+    googleLabel,
+    filtered.length
+  );
+  await trace("info", "background", "runGoogleSearchQueue 全部成功", {
+    n: results.length,
+    mode,
+    difyScheduled,
+  });
+  return { ok: true, results, difyScheduled };
+  } finally {
+    endCollectionJobIfNeeded();
+  }
 }
 
 async function ensureGoogleTab() {
@@ -805,7 +1618,7 @@ async function sendToTabWithRetry(tabId, message, csFile = GEMINI_CS_FILE, opts 
       try {
         await chrome.scripting.executeScript({
           target: { tabId, ...(injectAllFrames ? { allFrames: true } : {}) },
-          files: [csFile],
+          files: injectContentScriptFiles(csFile),
         });
         await trace("info", "background", "已注入内容脚本", {
           tabId,
@@ -823,8 +1636,8 @@ async function sendToTabWithRetry(tabId, message, csFile = GEMINI_CS_FILE, opts 
 }
 
 /**
- * 记录失败（写入调试日志 + storage），不自动下载文件，避免每次失败都弹出下载。
- * 完整排查请用弹窗「调试日志 → 导出 JSON」。
+ * 记录失败（写入调试日志 + storage）。
+ * 部分采集失败时由 handlePartialCollectionFailure 另行下载进度 CSV。
  * @param {Record<string, unknown>} context
  */
 async function recordRunError(context) {
@@ -878,10 +1691,61 @@ async function saveRunToStorage(results, site) {
       site: site || "unknown",
       completedAt: at,
       results,
+      inProgress: false,
+      partial: false,
     },
     lastRunError: null,
   });
-  await maybeAnalyzeWithDify(results, site);
+  // Dify 可能耗时数分钟，不可阻塞 RUN_* 的 sendResponse（~30s 通道超时）
+  void runDifyAnalysisInBackground(results, site);
+}
+
+/**
+ * 后台执行 Dify / 占位 CSV，与采集队列响应解耦。
+ * @param {object[]} results
+ * @param {string} site
+ */
+async function runDifyAnalysisInBackground(results, site) {
+  if (difyJsonJobBusy) {
+    await trace("warn", "background", "Dify 后台任务跳过：已有任务在执行");
+    return;
+  }
+  difyJsonJobBusy = true;
+  try {
+    await maybeAnalyzeWithDify(results, site);
+  } catch (e) {
+    const msg = String(e?.message || e);
+    await trace("error", "background", "Dify 后台任务异常", msg);
+    await downloadStubCsvIfPossible(buildWorkflowExportJson(results, site));
+    await updateRunProgress({
+      status: "done",
+      message: "Dify 失败 · 已下载占位 CSV",
+    });
+  } finally {
+    difyJsonJobBusy = false;
+  }
+}
+
+/**
+ * 采集结束后、Dify 启动前更新进度，并返回是否已调度 Dify。
+ * @param {object[]} results
+ * @param {string} site
+ * @param {string} label
+ * @param {number} total
+ */
+async function finishCollectionPhase(results, site, label, total) {
+  const cfg = await chrome.storage.local.get(["difyWorkflowEnabled"]);
+  const difyScheduled = cfg.difyWorkflowEnabled !== false;
+  const n = results.length;
+  await updateRunProgress({
+    status: difyScheduled ? "running" : "done",
+    current: n,
+    total,
+    message: difyScheduled
+      ? `完成 · ${label} · ${n} 条 · Dify 处理中…`
+      : `完成 · ${label} · ${n} 条`,
+  });
+  return difyScheduled;
 }
 
 /**
@@ -954,40 +1818,64 @@ async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uplo
         error: err,
       },
     });
+    await downloadStubCsvIfPossible(payloadObject);
     return { ok: false, error: err };
   }
 
   try {
-    const jsonStr = JSON.stringify(payloadObject, null, 2);
-    const blob = new Blob([jsonStr], { type: "application/json" });
-    const fname = `${uploadBaseName}-${Date.now()}.json`;
-
+    const resultCount = Array.isArray(payloadObject?.results) ? payloadObject.results.length : 0;
     await trace("info", "background", "Dify：上传 JSON 并执行工作流", {
       apiBase,
       userId,
-      filename: fname,
+      resultCount,
+      batched: resultCount > 29,
     });
 
-    const fileId = await difyUploadFile(apiBase, apiKey, userId, blob, fname);
-    const csv = await difyRunWorkflowBlockingWithTypeRetry(
+    const csv = await runDifyWorkflowBatched(
       apiBase,
       apiKey,
       userId,
-      fileId,
-      brands
+      payloadObject,
+      brands,
+      uploadBaseName,
+      { shouldAbort: () => difyAbortRequested }
     );
 
+    const cancelled = difyAbortRequested;
     await downloadCsvText(csv, "Brand_Visibility_Report");
+    await trace("info", "background", "Dify：CSV 已触发下载", {});
+    const doneMsg = cancelled
+      ? "Dify 已停止 · 已下载已完成批次的 CSV"
+      : Array.isArray(payloadObject?.results) && payloadObject.results.length > 29
+        ? `已从 Dify 工作流下载 CSV（${Math.ceil(payloadObject.results.length / 29)} 批合并）`
+        : "已从 Dify 工作流下载 Brand_Visibility_Report CSV";
     await chrome.storage.local.set({
       lastDifyRun: {
-        ok: true,
+        ok: !cancelled,
         at: new Date().toISOString(),
-        message: "已从 Dify 工作流下载 Brand_Visibility_Report CSV",
+        message: doneMsg,
+        ...(cancelled ? { cancelled: true } : {}),
       },
     });
+    if (cancelled) {
+      await updateRunProgress({ status: "done", message: doneMsg });
+      difyAbortRequested = false;
+      return { ok: true, cancelled: true };
+    }
     await trace("info", "background", "Dify：工作流完成并已下载 CSV", {});
     return { ok: true };
   } catch (e) {
+    const aborted = e?.code === "DIFY_ABORTED" || difyAbortRequested;
+    if (aborted) {
+      await downloadStubCsvIfPossible(payloadObject);
+      const msg = "Dify 已停止 · 已下载占位 CSV";
+      await chrome.storage.local.set({
+        lastDifyRun: { ok: false, at: new Date().toISOString(), error: msg, cancelled: true },
+      });
+      await updateRunProgress({ status: "done", message: msg });
+      difyAbortRequested = false;
+      return { ok: true, cancelled: true };
+    }
     const msg = String(e?.message || e);
     await trace("error", "background", "Dify 工作流失败", msg);
     await chrome.storage.local.set({
@@ -997,12 +1885,10 @@ async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uplo
         error: msg,
       },
     });
+    await downloadStubCsvIfPossible(payloadObject);
     return { ok: false, error: msg };
   }
 }
-
-/** 防止并发执行「JSON → Dify」任务 */
-let difyJsonJobBusy = false;
 
 /**
  * 在后台完整执行 JSON→Dify→CSV（阻塞模式，无 SSE / 节点追踪）。
@@ -1017,6 +1903,7 @@ async function runDifyJsonJob(msg) {
     return { ok: false, error: "已有 Dify 任务在执行，请稍候" };
   }
   difyJsonJobBusy = true;
+  difyAbortRequested = false;
 
   try {
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
@@ -1056,36 +1943,7 @@ async function runDifyJsonJob(msg) {
       return { ok: false, error: err };
     }
 
-    const jsonStr = JSON.stringify(payload, null, 2);
-    const blob = new Blob([jsonStr], { type: "application/json" });
-    const fname = `ai-autochat-import-${Date.now()}.json`;
-
-    await trace("info", "background", "Dify：上传并阻塞执行工作流", {
-      apiBase,
-      userId,
-      filename: fname,
-    });
-
-    const fileId = await difyUploadFile(apiBase, apiKey, userId, blob, fname);
-
-    const csv = await difyRunWorkflowBlockingWithTypeRetry(
-      apiBase,
-      apiKey,
-      userId,
-      fileId,
-      brands
-    );
-
-    await downloadCsvText(csv, "Brand_Visibility_Report");
-    await chrome.storage.local.set({
-      lastDifyRun: {
-        ok: true,
-        at: new Date().toISOString(),
-        message: "已从 Dify 工作流下载 Brand_Visibility_Report CSV",
-      },
-    });
-    await trace("info", "background", "Dify：工作流完成并已下载 CSV", {});
-    return { ok: true };
+    return await runDifyWorkflowWithPayload(cfg, payload, brands, "ai-autochat-import");
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
     await trace("error", "background", "Dify 工作流失败", errMsg);
@@ -1097,6 +1955,60 @@ async function runDifyJsonJob(msg) {
       },
     });
     return { ok: false, error: errMsg };
+  } finally {
+    difyJsonJobBusy = false;
+    try {
+      await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * 上传占位 CSV，解析后补跑 Dify 填 LLM 列。
+ * @param {string} csvText
+ * @param {string} [targetBrands]
+ */
+async function runDifyStubCsvJob(csvText, targetBrands) {
+  if (difyJsonJobBusy) {
+    return { ok: false, error: "已有 Dify 任务在执行，请稍候" };
+  }
+  difyJsonJobBusy = true;
+  difyAbortRequested = false;
+
+  try {
+    await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
+    await updateRunProgress({ status: "running", message: "正在解析占位 CSV 并补跑 Dify…" });
+
+    const cfg = await chrome.storage.local.get([
+      "difyBaseUrl",
+      "difyApiKey",
+      "difyApiUser",
+      "difyTargetBrands",
+    ]);
+    const brands = String(targetBrands || cfg.difyTargetBrands || "").trim();
+
+    let parsed;
+    try {
+      parsed = parseBrandReportCsvToResults(csvText);
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      await chrome.storage.local.set({
+        lastDifyRun: { ok: false, at: new Date().toISOString(), error: err },
+      });
+      return { ok: false, error: err };
+    }
+
+    const payload = buildWorkflowExportJson(parsed.results, parsed.site);
+    payload.source = "ai-autochat-stub-csv-import";
+
+    return await runDifyWorkflowWithPayload(
+      cfg,
+      payload,
+      brands,
+      `ai-autochat-${parsed.site}-stub-retry`
+    );
   } finally {
     difyJsonJobBusy = false;
     try {
@@ -1122,6 +2034,8 @@ async function maybeAnalyzeWithDify(results, site) {
   }
 
   if (!cfg.difyWorkflowEnabled) {
+    const payload = buildWorkflowExportJson(results, site);
+    await downloadStubCsvIfPossible(payload);
     try {
       await chrome.storage.local.remove("lastDifyRun");
     } catch {
@@ -1132,14 +2046,31 @@ async function maybeAnalyzeWithDify(results, site) {
 
   const targetBrands = String(cfg.difyTargetBrands || "").trim();
   const payload = buildWorkflowExportJson(results, site);
+  difyAbortRequested = false;
   try {
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
-    await runDifyWorkflowWithPayload(
+    await updateRunProgress({
+      status: "running",
+      message: "采集已完成，正在执行 Dify 工作流…",
+    });
+    const result = await runDifyWorkflowWithPayload(
       cfg,
       payload,
       targetBrands,
       `ai-autochat-${site || "run"}`
     );
+    if (result.ok) {
+      const data = await chrome.storage.local.get(["lastDifyRun"]);
+      await updateRunProgress({
+        status: "done",
+        message: String(data.lastDifyRun?.message || "Dify 完成 · CSV 已下载"),
+      });
+    } else if (!result.cancelled) {
+      await updateRunProgress({
+        status: "done",
+        message: String(result.error || "Dify 失败 · 已下载占位 CSV"),
+      });
+    }
   } finally {
     try {
       await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
@@ -1157,18 +2088,23 @@ function buildXlsxBuffer(lastRun) {
   const site = String(lastRun?.site || "unknown");
   const rows = Array.isArray(lastRun?.results) ? lastRun.results : [];
   /** @type {(string | number)[][]} */
-  const aoa = [
-    ["站点", "问题", "回答", "引用链接", "页面 URL", "采集时间"],
-  ];
+  const aoa = [BRAND_REPORT_CSV_HEADERS];
   for (const r of rows) {
-    const citations = Array.isArray(r?.citations) ? r.citations.join("\n") : "";
+    const capturedAt = String(r?.capturedAt ?? "");
     aoa.push([
-      String(r?.site ?? site),
       String(r?.question ?? ""),
+      isoToUsDate(capturedAt),
+      String(r?.site ?? site),
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
       String(r?.answer ?? ""),
-      citations,
+      formatCitationsCell(r?.citations),
       String(r?.pageUrl ?? ""),
-      String(r?.capturedAt ?? ""),
+      capturedAt,
     ]);
   }
   const wb = XLSX.utils.book_new();
@@ -1224,6 +2160,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             ok: false,
             error: String(e instanceof Error ? e.message : e),
           });
+        } catch {
+          /* ignore */
+        }
+      });
+    return true;
+  }
+
+  if (msg?.type === "START_DIFY_STUB_CSV") {
+    const csvText = typeof msg.csvText === "string" ? msg.csvText : "";
+    const targetBrands = typeof msg.targetBrands === "string" ? msg.targetBrands : "";
+    runDifyStubCsvJob(csvText, targetBrands)
+      .then((result) => {
+        try {
+          sendResponse(result);
+        } catch {
+          /* ignore */
+        }
+      })
+      .catch((e) => {
+        try {
+          sendResponse({ ok: false, error: String(e?.message || e) });
         } catch {
           /* ignore */
         }
@@ -1306,6 +2263,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
       })
       .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (msg?.type === "GET_JOB_STATE") {
+    getJobState()
+      .then((state) => sendResponse(state))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (msg?.type === "STOP_CURRENT_JOB") {
+    stopCurrentJob()
+      .then((result) => sendResponse(result))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  if (msg?.type === "RUN_MULTI") {
+    const questions = Array.isArray(msg.questions) ? msg.questions : [];
+    const platforms = Array.isArray(msg.platforms) ? msg.platforms : [];
+    sendResponse({ ok: true, started: true, platforms });
+    void runMultiPlatformQueue(questions, platforms).catch(async (err) => {
+      await trace("error", "background", "runMultiPlatformQueue 未捕获异常", String(err));
+      await recordRunError({
+        phase: "runMultiPlatformQueue_uncaught",
+        error: String(err?.message || err),
+      });
+    });
     return true;
   }
 

@@ -8,11 +8,52 @@ body {
   font-size: 13px;
   color: #1a1a1a;
   background: #fafafa;
+  min-width: 360px;
 }
 
 .wrap {
-  width: 360px;
+  width: auto;
+  max-width: 420px;
   padding: 12px 14px 14px;
+}
+
+.topbar-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.panel-hint {
+  margin: 0;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.3;
+}
+
+.dify-retry-panel {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e5e5;
+}
+
+.retry-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.45;
+}
+
+button.secondary {
+  flex: 1;
+  width: 100%;
+  background: #fff;
+  border-color: #ccc;
+  color: #333;
+}
+
+button.secondary:hover {
+  background: #f3f3f3;
 }
 
 .topbar {
@@ -83,6 +124,65 @@ textarea:focus {
   border-color: #1a73e8;
 }
 
+.platform-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.platform-pick-hint {
+  margin: 0;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.4;
+}
+
+.platform-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  cursor: pointer;
+  user-select: none;
+}
+
+.platform-pick-item input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.platform-pick-item span {
+  font-weight: 500;
+}
+
+.platform-pick-item.gemini {
+  border-left: 4px solid #1a73e8;
+}
+
+.platform-pick-item.chatgpt {
+  border-left: 4px solid #10a37f;
+}
+
+.platform-pick-item.perplexity {
+  border-left: 4px solid #20808d;
+}
+
+.platform-pick-item:has(input:checked) {
+  background: #f5f9ff;
+  border-color: #c5d9f5;
+}
+
+.platform-pick-item:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .row {
   display: flex;
   gap: 8px;
@@ -143,6 +243,34 @@ button:disabled {
   color: #b3261e;
 }
 
+.status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.status-row .global-status {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+}
+
+button.stop-btn {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+button.danger {
+  background: #fff;
+  border: 1px solid #d93025;
+  color: #d93025;
+}
+
+button.danger:hover {
+  background: #fce8e6;
+}
+
 .dify-run-panel {
   margin-top: 12px;
   padding-top: 10px;
@@ -167,6 +295,19 @@ button:disabled {
   border: 1px solid #ccc;
   border-radius: 6px;
   background: #fff;
+}
+
+.run-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.run-checkbox input[type="checkbox"] {
+  margin: 0;
+  flex-shrink: 0;
 }
 
 /* —— 设置 —— */

@@ -9,7 +9,10 @@
   <body>
     <main class="wrap">
       <header class="topbar">
-        <h1 class="title">AI AutoChat</h1>
+        <div class="topbar-main">
+          <h1 class="title">AI AutoChat</h1>
+          <p class="panel-hint">侧边栏 · 点击页面不会关闭 · 进度会自动保存</p>
+        </div>
         <nav class="tabs" role="tablist" aria-label="主标签">
           <button type="button" class="tab active" data-tab="run" id="tabRun" role="tab" aria-selected="true">
             运行
@@ -20,7 +23,10 @@
         </nav>
       </header>
 
-      <p id="status" class="status global-status" role="status"></p>
+      <div class="status-row">
+        <p id="status" class="status global-status" role="status"></p>
+        <button id="stopJob" type="button" class="danger mini stop-btn" hidden>停止</button>
+      </div>
 
       <div id="panelRun" class="tab-panel" role="tabpanel" aria-labelledby="tabRun">
         <textarea
@@ -31,21 +37,43 @@
         ></textarea>
 
         <section class="dify-run-panel" aria-label="Dify">
+          <label class="run-field run-checkbox">
+            <input type="checkbox" id="difyWorkflowEnabled" checked />
+            <span>采集完成后自动上传 Dify</span>
+          </label>
           <label class="run-field">
             <span class="run-label">target_brands</span>
             <input type="text" id="difyTargetBrands" spellcheck="false" autocomplete="off" />
           </label>
         </section>
 
+        <section class="platform-pick" aria-label="选择平台">
+          <p class="platform-pick-hint">勾选平台后连续运行，顺序：Gemini → ChatGPT → Perplexity</p>
+          <label class="platform-pick-item gemini">
+            <input type="checkbox" id="pickGemini" value="gemini" />
+            <span>Gemini</span>
+          </label>
+          <label class="platform-pick-item chatgpt">
+            <input type="checkbox" id="pickChatgpt" value="chatgpt" />
+            <span>ChatGPT</span>
+          </label>
+          <label class="platform-pick-item perplexity">
+            <input type="checkbox" id="pickPerplexity" value="perplexity" />
+            <span>Perplexity</span>
+          </label>
+        </section>
+
         <div class="row">
-          <button id="runGemini" type="button" class="primary full">Gemini</button>
+          <button id="runSelected" type="button" class="primary full">运行已选平台</button>
         </div>
-        <div class="row">
-          <button id="runChatgpt" type="button" class="primary chatgpt full">ChatGPT</button>
-        </div>
-        <div class="row">
-          <button id="runPerplexity" type="button" class="primary perplexity full">Perplexity</button>
-        </div>
+
+        <section class="dify-retry-panel" aria-label="Dify 补跑">
+          <p class="retry-hint">采集成功但 Dify 失败时会自动下载占位 CSV（LLM 列为空），可上传该文件补跑 Dify：</p>
+          <div class="row retry-upload-row">
+            <input id="stubCsvFile" type="file" accept=".csv,text/csv" hidden />
+            <button id="uploadStubCsv" type="button" class="secondary full">上传占位 CSV 补跑 Dify</button>
+          </div>
+        </section>
       </div>
 
       <div id="panelSettings" class="tab-panel" role="tabpanel" aria-labelledby="tabSettings" hidden>

@@ -1,0 +1,672 @@
+app:
+  description: '上传 ai-autochat / ChatGPT 导出的 .json 文件（含 results 数组），在开始节点填写 target_brands（英文逗号分隔），
+
+    逐条分析品牌提及、竞品数量、份额、情感与备注；Date Checked 由每条 capturedAt 自动换算为 M/D/YYYY；Platform 列来自导出
+    JSON 的 site 字段；CSV 含 Assistant Answer 全文列。
+
+    结束节点仅输出 **csv_report**：纯 CSV 文本，可复制到编辑器后另存为 .csv 使用。
+
+    '
+  icon: 📊
+  icon_background: '#E8F5E9'
+  icon_type: emoji
+  mode: workflow
+  name: Brand Visibility Report (LLM + brands list)
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/openai_api_compatible:0.0.53@a0dfb462961a03c6a6415d4185043185b01017c64da93cf82a9e5ecaf59f8ed0
+    version: null
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .json
+      - .JSON
+      allowed_file_types:
+      - custom
+      - document
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: true
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: document-extractor
+      id: edge-start-extract
+      source: start_node
+      sourceHandle: source
+      target: extract_json
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: document-extractor
+        targetType: code
+      id: edge-extract-parse
+      source: extract_json
+      sourceHandle: source
+      target: parse_export
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: iteration
+      id: edge-parse-iter
+      source: parse_export
+      sourceHandle: source
+      target: iter_conversations
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        sourceType: iteration-start
+        targetType: code
+      id: edge-iterstart-unpack
+      source: iter_conversations_start
+      sourceHandle: source
+      target: unpack_row
+      targetHandle: target
+      type: custom
+      zIndex: 1002
+    - data:
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        sourceType: code
+        targetType: llm
+      id: edge-unpack-llm
+      source: unpack_row
+      sourceHandle: source
+      target: llm_analyze
+      targetHandle: target
+      type: custom
+      zIndex: 1002
+    - data:
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        sourceType: llm
+        targetType: code
+      id: edge-llm-combine
+      source: llm_analyze
+      sourceHandle: source
+      target: combine_row
+      targetHandle: target
+      type: custom
+      zIndex: 1002
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: iteration
+        targetType: code
+      id: edge-iter-merge
+      source: iter_conversations
+      sourceHandle: source
+      target: merge_csv
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: end
+      id: edge-merge-end
+      source: merge_csv
+      sourceHandle: source
+      target: end_node
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: Start
+        type: start
+        variables:
+        - allowed_file_extensions:
+          - .json
+          - .JSON
+          allowed_file_types:
+          - custom
+          - document
+          allowed_file_upload_methods:
+          - local_file
+          - remote_url
+          default:
+            base64Url: ''
+            id: b7120aa9-a086-4b78-a6ad-55f0d0326bc9
+            name: ai-autochat-gemini-1780974115095.json
+            originalFile: {}
+            progress: 100
+            size: 92411
+            supportFileType: custom
+            transferMethod: local_file
+            type: application/json
+            uploadedId: a4c43c1b-f047-4f8b-8016-8791c2e68962
+          description: 上传 ai-autochat 导出的 JSON 文件
+          hide: false
+          label: Chat 导出 JSON 文件
+          required: true
+          type: file
+          variable: export_file
+        - default: tuneskit
+          description: 工作流输入变量：要追踪的品牌，英文逗号分隔（如 NoteBurner, TunePat）
+          label: 目标品牌 target_brands
+          max_length: null
+          options: []
+          required: true
+          type: text-input
+          variable: target_brands
+      height: 135
+      id: start_node
+      position:
+        x: 80
+        y: 200
+      positionAbsolute:
+        x: 80
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        is_array_file: false
+        selected: false
+        title: 读取 JSON 文本
+        type: document-extractor
+        variable_selector:
+        - start_node
+        - export_file
+      height: 104
+      id: extract_json
+      position:
+        x: 400
+        y: 200
+      positionAbsolute:
+        x: 400
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "import json\n\ndef main(export_json_text: str) -> dict:\n    data =\
+          \ json.loads(export_json_text.strip())\n    results = data.get(\"results\"\
+          ) or []\n    items = []\n    for r in results:\n        payload = {\n  \
+          \          \"question\": r.get(\"question\") or \"\",\n            \"answer\"\
+          : r.get(\"answer\") or \"\",\n            \"capturedAt\": r.get(\"capturedAt\"\
+          ) or \"\",\n            \"pageUrl\": r.get(\"pageUrl\") or \"\",\n     \
+          \       \"site\": r.get(\"site\") or \"\",\n            \"citations\"\
+          : r.get(\"citations\") or [],\n        }\n        items.append(json.dumps(payload,\
+          \ ensure_ascii=False))\n    return {\"items\": items}\n"
+        code_language: python3
+        desc: 解析导出 JSON，将每条对话压成字符串供迭代
+        outputs:
+          items:
+            children: null
+            type: array[string]
+        selected: false
+        title: 解析导出 JSON
+        type: code
+        variables:
+        - value_selector:
+          - extract_json
+          - text
+          value_type: string
+          variable: export_json_text
+      height: 96
+      id: parse_export
+      position:
+        x: 718.4615384615386
+        y: 200
+      positionAbsolute:
+        x: 718.4615384615386
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        error_handle_mode: terminated
+        height: 178
+        is_parallel: true
+        iterator_input_type: array[string]
+        iterator_selector:
+        - parse_export
+        - items
+        output_selector:
+        - combine_row
+        - combined_json
+        output_type: array[string]
+        parallel_nums: 2
+        selected: false
+        start_node_id: iter_conversations_start
+        title: 逐条分析对话
+        type: iteration
+        width: 1037
+      height: 178
+      id: iter_conversations
+      position:
+        x: 770.7692307692307
+        y: 449.23076923076917
+      positionAbsolute:
+        x: 770.7692307692307
+        y: 449.23076923076917
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 1037
+      zIndex: 1
+    - data:
+        desc: ''
+        isInIteration: true
+        selected: false
+        title: ''
+        type: iteration-start
+      draggable: false
+      height: 48
+      id: iter_conversations_start
+      parentId: iter_conversations
+      position:
+        x: 24
+        y: 68
+      positionAbsolute:
+        x: 794.7692307692307
+        y: 517.2307692307692
+      selectable: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom-iteration-start
+      width: 44
+      zIndex: 1002
+    - data:
+        code: "import json\n\ndef main(item: str) -> dict:\n    o = json.loads(item)\n\
+          \    cites = o.get(\"citations\") or []\n    return {\n        \"question\"\
+          : o.get(\"question\", \"\"),\n        \"answer\": o.get(\"answer\", \"\"\
+          ),\n        \"capturedAt\": o.get(\"capturedAt\", \"\"),\n        \"pageUrl\"\
+          : o.get(\"pageUrl\", \"\"),\n        \"site\": o.get(\"site\", \"\"),\n\
+          \        \"citations_json\": json.dumps(cites, ensure_ascii=False),\n \
+          \   }\n"
+        code_language: python3
+        desc: ''
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        outputs:
+          answer:
+            children: null
+            type: string
+          capturedAt:
+            children: null
+            type: string
+          pageUrl:
+            children: null
+            type: string
+          question:
+            children: null
+            type: string
+          site:
+            children: null
+            type: string
+          citations_json:
+            children: null
+            type: string
+        selected: false
+        title: 展开单条对话
+        type: code
+        variables:
+        - value_selector:
+          - iter_conversations
+          - item
+          value_type: string
+          variable: item
+      height: 52
+      id: unpack_row
+      parentId: iter_conversations
+      position:
+        x: 95.38461538461547
+        y: 90.76923076923077
+      positionAbsolute:
+        x: 866.1538461538462
+        y: 540
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 1002
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: 输出仅一段合法 JSON，勿 markdown
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        memory:
+          enabled: false
+          role_prefix:
+            assistant: ''
+            user: ''
+          window:
+            enabled: false
+            size: 50
+        model:
+          completion_params:
+            temperature: 0
+          mode: chat
+          name: astron-code-latest
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: b0c8eeb1-289a-42c1-a4be-7d967051cf35
+          role: system
+          text: '你是品牌可见度分析师。根据「用户问题」和「助手完整回答」判断目标品牌是否被提及，并统计回答中出现的独立产品/工具/品牌名数量。
+
+
+            TARGET BRANDS（逗号分隔，匹配中英文或常见拼写变体，需结合上下文）：
+
+            {{#start_node.target_brands#}}
+
+
+            规则：
+
+            1) brand_mentioned：任一目标品牌被明确提及（含别名）为 Yes，否则 No。
+
+            2) num_brands_mentioned：助手回答中列出的不同品牌/产品/工具名称数量（含目标与竞品；编号列表里每个算一个）。
+
+            3) share_calculation：若 brand_mentioned 为 Yes 且 num_brands_mentioned >=
+            1，填 round(100 / num_brands_mentioned) 的整数；否则填 null。
+
+            4) sentiment：仅针对被提及的目标品牌整体语气：Positive / Neutral / Negative；若 brand_mentioned
+            为 No 则填 N/A。
+
+            5) notes：一句英文营销备注（机会或观察）。
+
+            6) query：必须与用户问题原文一致。
+
+            7) brands_mentioned：助手回答中明确列出的所有品牌/产品/工具名称（字符串数组，去重；若无则 []）。
+
+
+            只输出一个 JSON 对象，不要代码块、不要其它文字。字段与类型：
+
+            {"query":string,"brand_mentioned":"Yes"|"No","num_brands_mentioned":number,"brands_mentioned":string[],"share_calculation":number|null,"sentiment":"Positive"|"Neutral"|"Negative"|"N/A","notes":string}
+
+
+            （日期由后续步骤从导出 JSON 的 capturedAt 自动填入 CSV，无需输出日期字段。）
+
+            '
+        - id: 684db65d-df97-40f3-bee7-bb968f1fd1b2
+          role: user
+          text: '用户问题：
+
+            {{#unpack_row.question#}}
+
+
+            助手回答：
+
+            {{#unpack_row.answer#}}
+
+            '
+        retry_config:
+          max_retries: 2
+          retry_enabled: false
+          retry_interval: 1000
+        selected: false
+        structured_output: null
+        structured_output_enabled: false
+        title: 品牌提及与情感分析
+        type: llm
+        vision:
+          configs:
+            variable_selector: []
+          enabled: false
+      height: 116
+      id: llm_analyze
+      parentId: iter_conversations
+      position:
+        x: 420
+        y: 52
+      positionAbsolute:
+        x: 1190.7692307692307
+        y: 501.23076923076917
+      selected: true
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 1002
+    - data:
+        code: "import json\nfrom datetime import datetime\n\ndef _iso_to_us_date(iso:\
+          \ str) -> str:\n    s = (iso or \"\").strip()\n    if not s:\n        return\
+          \ \"\"\n    if s.endswith(\"Z\"):\n        s = s[:-1] + \"+00:00\"\n   \
+          \ try:\n        dt = datetime.fromisoformat(s)\n    except ValueError:\n\
+          \        try:\n            dt = datetime.strptime(s[:19], \"%Y-%m-%dT%H:%M:%S\"\
+          )\n        except ValueError:\n            return \"\"\n    return f\"{dt.month}/{dt.day}/{dt.year}\"\
+          \n\n\ndef main(llm_text: str, original_answer: str, captured_at: str, site:\
+          \ str, page_url: str, citations_json: str, question: str) -> dict:\n    s\
+          \ = (llm_text or \"\").strip()\n    a = s.find(\"{\")\n    b = s.rfind(\"\
+          }\")\n    if a >= 0 and b > a:\n        s = s[a : b + 1]\n    try:\n   \
+          \     obj = json.loads(s)\n    except Exception:\n        obj = {\n    \
+          \        \"query\": \"\",\n            \"brand_mentioned\": \"No\",\n \
+          \           \"num_brands_mentioned\": 0,\n            \"share_calculation\"\
+          : None,\n            \"sentiment\": \"N/A\",\n            \"notes\": \"\
+          llm_json_parse_error\",\n        }\n    if not isinstance(obj.get(\"brands_mentioned\"\
+          ), list):\n        obj[\"brands_mentioned\"] = []\n    if not obj.get(\"\
+          query\"):\n        obj[\"query\"] = question or \"\"\n    try:\n       \
+          \ cites = json.loads(citations_json or \"[]\")\n    except Exception:\n \
+          \       cites = []\n    if isinstance(cites, list):\n        citations_cell\
+          \ = \"\\n\".join(str(x).strip() for x in cites if str(x).strip())\n   \
+          \ else:\n        citations_cell = str(cites or \"\")\n    obj[\"assistant_answer\"\
+          ] = original_answer or \"\"\n    obj[\"date_checked\"] = _iso_to_us_date(captured_at)\n\
+          \    obj[\"platform\"] = (site or \"\").strip()\n    obj[\"page_url\"] =\
+          \ (page_url or \"\").strip()\n    obj[\"captured_at_raw\"] = (captured_at\
+          \ or \"\").strip()\n    obj[\"citations_cell\"] = citations_cell\n    return\
+          \ {\"combined_json\": json.dumps(obj, ensure_ascii=False)}\n"
+        code_language: python3
+        desc: 合并 LLM 分析与原始助手全文，供 CSV 增加「Assistant Answer」列
+        isInIteration: true
+        isInLoop: false
+        iteration_id: iter_conversations
+        outputs:
+          combined_json:
+            children: null
+            type: string
+        selected: false
+        title: 合并原始回答
+        type: code
+        variables:
+        - value_selector:
+          - llm_analyze
+          - text
+          value_type: string
+          variable: llm_text
+        - value_selector:
+          - unpack_row
+          - answer
+          value_type: string
+          variable: original_answer
+        - value_selector:
+          - unpack_row
+          - capturedAt
+          value_type: string
+          variable: captured_at
+        - value_selector:
+          - unpack_row
+          - site
+          value_type: string
+          variable: site
+        - value_selector:
+          - unpack_row
+          - pageUrl
+          value_type: string
+          variable: page_url
+        - value_selector:
+          - unpack_row
+          - citations_json
+          value_type: string
+          variable: citations_json
+        - value_selector:
+          - unpack_row
+          - question
+          value_type: string
+          variable: question
+      height: 96
+      id: combine_row
+      parentId: iter_conversations
+      position:
+        x: 780
+        y: 52
+      positionAbsolute:
+        x: 1550.7692307692307
+        y: 501.23076923076917
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 1002
+    - data:
+        code: "import csv\nimport json\nfrom io import StringIO\n\ndef _parse_obj(s:\
+          \ str) -> dict:\n    s = (s or \"\").strip()\n    a = s.find(\"{\")\n  \
+          \  b = s.rfind(\"}\")\n    if a >= 0 and b > a:\n        s = s[a : b + 1]\n\
+          \    return json.loads(s)\n\n\ndef main(rows) -> dict:\n    out = StringIO()\n\
+          \    w = csv.writer(out)\n    w.writerow(\n        [\n            \"Query\"\
+          ,\n            \"Date Checked\",\n            \"Platform\",\n          \
+          \  \"Brand Mentioned\",\n            \"No. of Brands Mentioned\",\n            \"Brands Mentioned\",\n    \
+          \        \"Share Calculation\",\n            \"Sentiment\",\n          \
+          \  \"Notes\",\n            \"Assistant Answer\",\n            \"Citations\"\
+          ,\n            \"Page URL\",\n            \"Captured At\",\n        ]\n\
+          \    )\n   \
+          \ for row in rows or []:\n        try:\n            o = _parse_obj(str(row))\n\
+          \        except Exception:\n            continue\n        share = o.get(\"\
+          share_calculation\")\n        share_cell = \"\" if share is None else str(share)\n\
+          \        brands = o.get(\"brands_mentioned\")\n        if isinstance(brands, list):\n\
+          \            brands_cell = \", \".join(str(x).strip() for x in brands if str(x).strip())\n\
+          \        else:\n            brands_cell = str(brands or \"\")\n        w.writerow(\n\
+          \            [\n                o.get(\"query\", \"\
+          \"),\n                o.get(\"date_checked\", \"\"),\n                o.get(\"\
+          platform\", \"\"),\n                o.get(\"brand_mentioned\", \"\"),\n\
+          \                o.get(\"num_brands_mentioned\", \"\"),\n              \
+          \  brands_cell,\n                share_cell,\n                o.get(\"sentiment\"\
+          , \"\"),\n          \
+          \      o.get(\"notes\", \"\"),\n                o.get(\"assistant_answer\"\
+          , \"\"),\n                o.get(\"citations_cell\", \"\"),\n           \
+          \     o.get(\"page_url\", \"\"),\n                o.get(\"captured_at_raw\"\
+          , \"\"),\n            ]\n        )\n    text = out.getvalue()\n    if text\
+          \ and not text.startswith(\"\\ufeff\"):\n        text = \"\\ufeff\" + text\n\
+          \    return {\"csv_text\": text}\n"
+        code_language: python3
+        desc: 将各条 LLM JSON 合并为 CSV 文本
+        outputs:
+          csv_text:
+            children: null
+            type: string
+        selected: false
+        title: 合并为 CSV
+        type: code
+        variables:
+        - value_selector:
+          - iter_conversations
+          - output
+          value_type: array[string]
+          variable: rows
+      height: 80
+      id: merge_csv
+      position:
+        x: 1580
+        y: 200
+      positionAbsolute:
+        x: 1580
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        outputs:
+        - value_selector:
+          - merge_csv
+          - csv_text
+          value_type: string
+          variable: csv_report
+        selected: false
+        title: End
+        type: end
+      height: 88
+      id: end_node
+      position:
+        x: 1920
+        y: 200
+      positionAbsolute:
+        x: 1920
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    viewport:
+      x: -300.15
+      y: 278.30000000000007
+      zoom: 0.65
+  rag_pipeline_variables: []

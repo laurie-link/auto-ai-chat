@@ -5,6 +5,19 @@
 
   const HOSTS = ["www.perplexity.ai", "perplexity.ai"];
 
+  let questionRunLock = Promise.resolve();
+
+  /**
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  function withQuestionLock(fn) {
+    const run = questionRunLock.then(fn);
+    questionRunLock = run.catch(() => {});
+    return run;
+  }
+
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
@@ -128,6 +141,56 @@
 
   /**
    * @param {HTMLElement} el
+   * @returns {string}
+   */
+  function getPromptText(el) {
+    if (el instanceof HTMLTextAreaElement) return (el.value || "").trim();
+    return (el.innerText || el.textContent || "").trim();
+  }
+
+  /**
+   * @param {HTMLElement} el
+   */
+  async function clearPromptEditor(el) {
+    await setPromptText(el, "");
+    await sleep(120);
+    if (getPromptText(el).length > 0) {
+      el.focus();
+      try {
+        document.execCommand("selectAll", false);
+        document.execCommand("delete", false);
+      } catch (_) {
+        el.textContent = "";
+      }
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      await sleep(120);
+    }
+  }
+
+  async function waitForGenerationEnd(maxMs = 180000) {
+    if (!isGenerating()) {
+      await sleep(200);
+      return;
+    }
+    await waitUntil(() => !isGenerating(), maxMs, 400);
+    await sleep(400);
+  }
+
+  /**
+   * @param {HTMLElement | null} root
+   */
+  function extractAssistantMarkdown(root) {
+    if (!root) return "";
+    const mdFn = globalThis.aiAutoChatHtmlToMarkdown;
+    if (typeof mdFn === "function") {
+      const md = mdFn(root).trim();
+      if (md.length > 20) return md;
+    }
+    return (root.innerText || "").trim();
+  }
+
+  /**
+   * @param {HTMLElement} el
    * @param {string} text
    */
   async function setPromptText(el, text) {
@@ -246,26 +309,37 @@
 
   /**
    * @param {string} _userQuestion
+   * @param {number} baselineProseCount
    */
-  async function waitForAnswerStable(_userQuestion) {
+  async function waitForAnswerStable(_userQuestion, baselineProseCount = 0) {
     const root = /** @type {HTMLElement} */ (findConversationRoot());
 
-    await sleep(900);
+    await sleep(400);
+    await waitUntil(() => isGenerating(), 8000, 200).catch(() => {});
     await waitUntil(() => !isGenerating(), 180000, 400);
-    await sleep(600);
+    await sleep(500);
+    await waitForGenerationEnd();
 
     let lastText = "";
     let stableTicks = 0;
     const minStableLen = 12;
 
-    for (let i = 0; i < 180; i++) {
-      await sleep(280);
+    for (let i = 0; i < 200; i++) {
+      await sleep(320);
       const nodes = collectAssistantRoots();
       const last =
         nodes.length > 0
           ? /** @type {HTMLElement} */ (nodes[nodes.length - 1])
           : null;
-      const text = (last?.innerText || "").trim() || (root.innerText || "").trim();
+      const proseCount = document.querySelectorAll("main .prose").length;
+      const text =
+        extractAssistantMarkdown(last) || (last?.innerText || "").trim() || (root.innerText || "").trim();
+
+      if (proseCount <= baselineProseCount && text.length < minStableLen) {
+        stableTicks = 0;
+        lastText = text;
+        continue;
+      }
 
       if (text.length < minStableLen) {
         stableTicks = 0;
@@ -273,19 +347,27 @@
         continue;
       }
 
+      if (isGenerating()) {
+        stableTicks = 0;
+        continue;
+      }
+
       if (text === lastText) stableTicks += 1;
       else stableTicks = 0;
       lastText = text;
 
-      if (stableTicks >= 8 && !isGenerating()) {
-        return { text, element: last || root };
+      if (stableTicks >= 12 && !isGenerating()) {
+        await waitForGenerationEnd();
+        const finalText = extractAssistantMarkdown(last) || text;
+        return { text: finalText, element: last || root };
       }
     }
 
     const nodes = collectAssistantRoots();
     const last =
       nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
-    return { text: (last.innerText || "").trim(), element: last };
+    const text = extractAssistantMarkdown(last) || (last.innerText || "").trim();
+    return { text, element: last };
   }
 
   /**
@@ -303,47 +385,56 @@
   }
 
   async function runOneQuestion(opts) {
-    trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
+    return withQuestionLock(async () => {
+      trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
 
-    if (!isPerplexityPage()) throw new Error("不在 Perplexity 页面");
+      if (!isPerplexityPage()) throw new Error("不在 Perplexity 页面");
 
-    await waitForPageReady();
+      await waitForPageReady();
+      if (isGenerating()) await waitForGenerationEnd();
 
-    trace("info", "查找输入框 #ask-input");
-    const editor = await waitFor(() => findPromptEditor(), 28000, 200);
-    trace("info", "找到输入框", { tag: editor.tagName, id: editor.id });
-
-    await setPromptText(editor, opts.question);
-    await sleep(200);
-
-    let send = findSendButton();
-    if (!send) {
-      try {
-        send = await waitFor(() => findSendButton(), 12000, 200);
-      } catch (_) {
-        send = null;
+      trace("info", "查找输入框 #ask-input");
+      const editor = await waitFor(() => findPromptEditor(), 28000, 200);
+      if (getPromptText(editor).length > 0) {
+        await clearPromptEditor(editor);
       }
-    }
-    if (send) {
-      trace("info", "点击 composer 主按钮", {});
-      send.click();
-    } else {
-      trace("warn", "未找到可点击主按钮，尝试 Enter");
-      editor.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })
-      );
-    }
 
-    trace("info", "等待回答");
-    const { text, element } = await waitForAnswerStable(opts.question);
-    trace("info", "采集完成", { answerLen: text.length });
-    const citations = extractCitationsFrom(element || findConversationRoot());
+      trace("info", "找到输入框", { tag: editor.tagName, id: editor.id });
 
-    return {
-      answer: text,
-      citations,
-      pageUrl: location.href,
-    };
+      const baselineProseCount = document.querySelectorAll("main .prose").length;
+
+      await setPromptText(editor, opts.question);
+      await sleep(250);
+
+      let send = findSendButton();
+      if (!send) {
+        try {
+          send = await waitFor(() => findSendButton(), 12000, 200);
+        } catch (_) {
+          send = null;
+        }
+      }
+      if (send) {
+        trace("info", "点击 composer 主按钮", {});
+        send.click();
+      } else {
+        trace("warn", "未找到可点击主按钮，尝试 Enter");
+        editor.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })
+        );
+      }
+
+      trace("info", "等待回答");
+      const { text, element } = await waitForAnswerStable(opts.question, baselineProseCount);
+      trace("info", "采集完成", { answerLen: text.length });
+      const citations = extractCitationsFrom(element || findConversationRoot());
+
+      return {
+        answer: text,
+        citations,
+        pageUrl: location.href,
+      };
+    });
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

@@ -20,27 +20,146 @@ function setStatus(text, isError = false) {
   el.classList.toggle("error", Boolean(isError));
 }
 
-const RUN_BUTTON_IDS = [
-  "runGemini",
-  "runChatgpt",
-  "runPerplexity",
+/**
+ * @param {Record<string, unknown> | null | undefined} runProgress
+ */
+function applyRunProgress(runProgress) {
+  if (!runProgress || typeof runProgress !== "object") return false;
+  const status = String(runProgress.status || "");
+  const message = String(runProgress.message || "");
+  if (!message) return false;
+
+  if (status === "running") {
+    setStatus(message, false);
+    updateJobUi(true);
+    return true;
+  }
+  if (status === "error") {
+    setStatus(message, true);
+    updateJobUi(false);
+    return true;
+  }
+  if (status === "done") {
+    setStatus(message, false);
+    updateJobUi(false);
+    return true;
+  }
+  return false;
+}
+
+/** @param {boolean} running */
+function updateJobUi(running) {
+  setRunButtonsDisabled(running);
+  const stop = $("stopJob");
+  if (stop instanceof HTMLButtonElement) stop.hidden = !running;
+  const upload = $("uploadStubCsv");
+  if (upload instanceof HTMLButtonElement) upload.disabled = running;
+}
+
+async function syncJobUiFromBackground() {
+  try {
+    const state = await chrome.runtime.sendMessage({ type: "GET_JOB_STATE" });
+    if (!state?.ok) {
+      updateJobUi(false);
+      return;
+    }
+    if (state.isActive) {
+      updateJobUi(true);
+      if (state.runProgress) {
+        applyRunProgress(state.runProgress);
+      } else if (state.difyWorkflowRunInProgress) {
+        setStatus("采集已完成，正在执行 Dify 工作流（请稍候）…");
+      }
+      return;
+    }
+    updateJobUi(false);
+    await refreshStatusFromStorage();
+  } catch {
+    updateJobUi(false);
+  }
+}
+
+async function refreshStatusFromStorage() {
+  try {
+    const data = await chrome.storage.local.get([
+      "runProgress",
+      "difyWorkflowRunInProgress",
+      "lastDifyRun",
+    ]);
+    if (data.difyWorkflowRunInProgress) {
+      setStatus("采集已完成，正在执行 Dify 工作流（请稍候）…");
+      updateJobUi(true);
+      return;
+    }
+    if (applyRunProgress(data.runProgress)) return;
+    updateJobUi(false);
+    const last = data.lastDifyRun;
+    if (last?.ok) {
+      setStatus(String(data.runProgress?.message || "已完成 · CSV 已下载"));
+    } else if (last && last.ok === false) {
+      setStatus(String(last.error || "失败"), true);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+const RUN_BUTTON_IDS = ["runSelected"];
+
+const PLATFORM_PICKS = [
+  { checkboxId: "pickGemini", platform: "gemini" },
+  { checkboxId: "pickChatgpt", platform: "chatgpt" },
+  { checkboxId: "pickPerplexity", platform: "perplexity" },
 ];
+
+function getSelectedPlatforms() {
+  /** @type {string[]} */
+  const out = [];
+  for (const { checkboxId, platform } of PLATFORM_PICKS) {
+    const el = $(checkboxId);
+    if (el instanceof HTMLInputElement && el.checked) out.push(platform);
+  }
+  return out;
+}
+
+function setPlatformPickersDisabled(disabled) {
+  for (const { checkboxId } of PLATFORM_PICKS) {
+    const el = $(checkboxId);
+    if (el instanceof HTMLInputElement) el.disabled = disabled;
+  }
+}
+
+function persistPlatformSelection() {
+  chrome.storage.local.set({ selectedPlatforms: getSelectedPlatforms() }).catch(() => {});
+}
+
+async function loadPlatformSelection() {
+  const data = await chrome.storage.local.get(["selectedPlatforms"]);
+  const selected = Array.isArray(data.selectedPlatforms) ? data.selectedPlatforms : [];
+  const set = new Set(selected.map(String));
+  for (const { checkboxId, platform } of PLATFORM_PICKS) {
+    const el = $(checkboxId);
+    if (el instanceof HTMLInputElement) {
+      el.checked = set.size > 0 ? set.has(platform) : platform === "gemini";
+    }
+  }
+}
 
 function setRunButtonsDisabled(disabled) {
   for (const id of RUN_BUTTON_IDS) {
     const el = $(id);
     if (el) el.disabled = disabled;
   }
+  setPlatformPickersDisabled(disabled);
 }
 
 async function loadDifySettings() {
-  await chrome.storage.local.set({ difyWorkflowEnabled: true });
-
   const data = await chrome.storage.local.get([
     "difyBaseUrl",
     "difyApiKey",
     "difyApiUser",
     "difyTargetBrands",
+    "difyWorkflowEnabled",
   ]);
   const base = $("difyBaseUrl");
   if (base instanceof HTMLInputElement) {
@@ -67,6 +186,10 @@ async function loadDifySettings() {
   if (brands instanceof HTMLInputElement) {
     brands.value = typeof data.difyTargetBrands === "string" ? data.difyTargetBrands : "";
   }
+  const enabled = $("difyWorkflowEnabled");
+  if (enabled instanceof HTMLInputElement) {
+    enabled.checked = data.difyWorkflowEnabled !== false;
+  }
 }
 
 function persistDifySettings() {
@@ -74,8 +197,9 @@ function persistDifySettings() {
   const keyEl = $("difyApiKey");
   const userEl = $("difyApiUser");
   const brandsEl = $("difyTargetBrands");
+  const enabledEl = $("difyWorkflowEnabled");
   chrome.storage.local.set({
-    difyWorkflowEnabled: true,
+    difyWorkflowEnabled: enabledEl instanceof HTMLInputElement ? enabledEl.checked : true,
     difyBaseUrl:
       baseEl instanceof HTMLInputElement && String(baseEl.value || "").trim()
         ? String(baseEl.value).trim()
@@ -145,6 +269,101 @@ async function loadLogs() {
   }
 }
 
+async function waitForBackgroundJobIdle(maxMs = 600000) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    try {
+      const state = await chrome.runtime.sendMessage({ type: "GET_JOB_STATE" });
+      if (!state?.isActive) return;
+      await refreshStatusFromStorage();
+    } catch {
+      /* ignore */
+    }
+    await new Promise((r) => setTimeout(r, 800));
+  }
+}
+
+async function runMultiSelected() {
+  const raw = $("questions").value;
+  const questions = parseQuestions(raw);
+  if (questions.length === 0) {
+    setStatus("请至少输入一行问题。", true);
+    popupTrace("运行被拒绝：无有效问题");
+    return;
+  }
+
+  const platforms = getSelectedPlatforms();
+  if (platforms.length === 0) {
+    setStatus("请至少勾选一个平台。", true);
+    popupTrace("运行被拒绝：未选平台");
+    return;
+  }
+
+  setRunButtonsDisabled(true);
+  updateJobUi(true);
+  setStatus("已提交多平台任务…");
+  chrome.storage.local.set({ lastQuestions: raw }).catch(() => {});
+  persistDifySettings();
+  persistPlatformSelection();
+  popupTrace("多平台运行", { platforms, count: questions.length });
+
+  const difyPhasePoll = setInterval(async () => {
+    try {
+      await refreshStatusFromStorage();
+    } catch {
+      /* ignore */
+    }
+  }, 500);
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "RUN_MULTI",
+      questions,
+      platforms,
+    });
+
+    if (res === undefined) {
+      setStatus(
+        "扩展后台无响应（service worker 可能未启动）。请打开 chrome://extensions 查看 Service Worker 控制台。",
+        true
+      );
+      return;
+    }
+
+    if (!res?.ok && !res?.started) {
+      setStatus(res?.error || "启动失败", true);
+      return;
+    }
+
+    const PLATFORM_LABELS = {
+      gemini: "Gemini",
+      chatgpt: "ChatGPT",
+      perplexity: "Perplexity",
+    };
+    const labels = platforms.map((p) => PLATFORM_LABELS[p] || p).join(" → ");
+    setStatus(`多平台任务运行中（${labels}）…`);
+    await waitForBackgroundJobIdle();
+    await refreshStatusFromStorage();
+  } catch (e) {
+    setStatus(String(e?.message || e), true);
+    popupTrace("RUN_MULTI 异常", { message: String(e?.message || e) });
+  } finally {
+    clearInterval(difyPhasePoll);
+    await syncJobUiFromBackground();
+    await loadLogs();
+  }
+}
+
+$("runSelected")?.addEventListener("click", () => {
+  void runMultiSelected();
+});
+
+for (const { checkboxId } of PLATFORM_PICKS) {
+  $(checkboxId)?.addEventListener("change", () => {
+    persistPlatformSelection();
+  });
+}
+
 /**
  * @param {"RUN_GEMINI"|"RUN_CHATGPT"|"RUN_PERPLEXITY"|"RUN_GOOGLE_AIO"|"RUN_GOOGLE_AIMODE"} runtimeType
  * @param {string} runningMsg
@@ -160,20 +379,20 @@ async function runQueue(runtimeType, runningMsg, okLabel) {
   }
 
   setRunButtonsDisabled(true);
-  setStatus(runningMsg);
+  updateJobUi(true);
+  setStatus("已提交，正在启动后台任务…");
+  chrome.storage.local.set({ lastQuestions: raw }).catch(() => {});
+  persistDifySettings();
   popupTrace(`点击运行`, { type: runtimeType, count: questions.length });
 
   /** 采集结束后若勾选「自动跑 Dify」，后台会置 difyWorkflowRunInProgress；轮询以切换状态文案 */
   const difyPhasePoll = setInterval(async () => {
     try {
-      const { difyWorkflowRunInProgress } = await chrome.storage.local.get("difyWorkflowRunInProgress");
-      if (difyWorkflowRunInProgress) {
-        setStatus("采集已完成，正在执行 Dify 工作流（请稍候）…");
-      }
+      await refreshStatusFromStorage();
     } catch {
       /* ignore */
     }
-  }, 350);
+  }, 500);
 
   /** Service Worker 无响应时不要 finally 里 loadLogs，避免冲掉本机写入的日志行 */
   let skipLoadLogsInFinally = false;
@@ -201,41 +420,115 @@ async function runQueue(runtimeType, runningMsg, okLabel) {
       return;
     }
     const n = res.results?.length ?? 0;
-    setStatus(`完成 · ${okLabel} · ${n} 条`);
-    popupTrace(`${runtimeType} 成功`, { n });
+    if (res.difyScheduled) {
+      setStatus(`完成 · ${okLabel} · ${n} 条 · Dify 处理中…`);
+      popupTrace(`${runtimeType} 采集完成，等待 Dify`, { n });
+      await waitForBackgroundJobIdle();
+      await refreshStatusFromStorage();
+    } else {
+      setStatus(`完成 · ${okLabel} · ${n} 条`);
+      popupTrace(`${runtimeType} 成功`, { n });
+    }
   } catch (e) {
     const msg = String(e?.message || e);
-    setStatus(msg, true);
-    popupTrace(`${runtimeType} 异常`, { message: msg });
+    if (/message channel closed/i.test(msg)) {
+      setStatus("采集可能已完成，正在后台等待 Dify…");
+      popupTrace(`${runtimeType} 通道超时，继续轮询 Dify`, { message: msg });
+      try {
+        await waitForBackgroundJobIdle();
+        await refreshStatusFromStorage();
+      } catch {
+        /* ignore */
+      }
+    } else {
+      setStatus(msg, true);
+      popupTrace(`${runtimeType} 异常`, { message: msg });
+    }
   } finally {
     clearInterval(difyPhasePoll);
-    setRunButtonsDisabled(false);
+    await syncJobUiFromBackground();
     if (!skipLoadLogsInFinally) await loadLogs();
   }
 }
 
-$("runGemini").addEventListener("click", async () => {
-  await runQueue(
-    "RUN_GEMINI",
-    "运行中…（请勿关闭 Gemini 标签页）",
-    "Gemini"
-  );
+/**
+ * @param {{ csvText?: string }} [extra]
+ */
+async function runDifySupplementJob(extra = {}) {
+  persistDifySettings();
+  const brandsEl = $("difyTargetBrands");
+  const targetBrands =
+    brandsEl instanceof HTMLInputElement ? String(brandsEl.value || "").trim() : "";
+
+  setRunButtonsDisabled(true);
+  updateJobUi(true);
+  setStatus("正在上传占位 CSV 并补跑 Dify…");
+
+  const poll = setInterval(() => {
+    refreshStatusFromStorage().catch(() => {});
+  }, 500);
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "START_DIFY_STUB_CSV",
+      csvText: extra.csvText || "",
+      targetBrands,
+    });
+    if (!res?.ok) {
+      setStatus(res?.error || "Dify 补跑失败", true);
+      return;
+    }
+    setStatus("Dify 补跑完成 · CSV 已下载");
+  } catch (e) {
+    setStatus(String(e?.message || e), true);
+  } finally {
+    clearInterval(poll);
+    await syncJobUiFromBackground();
+    await loadLogs();
+  }
+}
+
+$("uploadStubCsv")?.addEventListener("click", () => {
+  $("stubCsvFile")?.click();
 });
 
-$("runChatgpt").addEventListener("click", async () => {
-  await runQueue(
-    "RUN_CHATGPT",
-    "运行中…（请勿关闭 ChatGPT 标签页）",
-    "ChatGPT"
-  );
+$("stopJob")?.addEventListener("click", async () => {
+  const stopBtn = $("stopJob");
+  if (stopBtn instanceof HTMLButtonElement) stopBtn.disabled = true;
+  setStatus("正在停止…");
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "STOP_CURRENT_JOB" });
+    if (!res?.ok) {
+      setStatus(res?.error || "停止失败", true);
+      updateJobUi(false);
+      return;
+    }
+    setStatus(res.message || "已发送停止请求…");
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const state = await chrome.runtime.sendMessage({ type: "GET_JOB_STATE" });
+      if (!state?.isActive) break;
+    }
+    await syncJobUiFromBackground();
+  } catch (e) {
+    setStatus(String(e?.message || e), true);
+    updateJobUi(false);
+  } finally {
+    if (stopBtn instanceof HTMLButtonElement) stopBtn.disabled = false;
+  }
 });
 
-$("runPerplexity").addEventListener("click", async () => {
-  await runQueue(
-    "RUN_PERPLEXITY",
-    "运行中…（请勿关闭 Perplexity 标签页）",
-    "Perplexity"
-  );
+$("stubCsvFile")?.addEventListener("change", async (ev) => {
+  const input = ev.target;
+  if (!(input instanceof HTMLInputElement) || !input.files?.length) return;
+  try {
+    const csvText = await input.files[0].text();
+    await runDifySupplementJob({ csvText });
+  } catch (e) {
+    setStatus(String(e?.message || e), true);
+  } finally {
+    input.value = "";
+  }
 });
 
 $("logRefresh").addEventListener("click", () => loadLogs());
@@ -256,12 +549,6 @@ $("logExport").addEventListener("click", async () => {
   }
 });
 
-chrome.storage.local.get(["lastQuestions"], (data) => {
-  if (typeof data.lastQuestions === "string" && data.lastQuestions.trim()) {
-    $("questions").value = data.lastQuestions;
-  }
-});
-
 /** @type {ReturnType<typeof setInterval> | null} */
 let difyBgWaitPollId = null;
 
@@ -276,24 +563,21 @@ function stopDifyBgWaitPoll() {
  * 弹窗曾关闭但后台仍在跑阻塞工作流时，根据 difyWorkflowRunInProgress 恢复提示。
  */
 async function resumeDifyJobIfBackgroundBusy() {
-  const { difyWorkflowRunInProgress } = await chrome.storage.local.get("difyWorkflowRunInProgress");
-  if (!difyWorkflowRunInProgress) return;
-  setStatus("工作流仍在后台执行，请稍候…");
-  stopDifyBgWaitPoll();
-  difyBgWaitPollId = setInterval(async () => {
-    const d = await chrome.storage.local.get(["difyWorkflowRunInProgress", "lastDifyRun"]);
-    if (d.difyWorkflowRunInProgress) return;
+  await refreshStatusFromStorage();
+  const { difyWorkflowRunInProgress, runProgress } = await chrome.storage.local.get([
+    "difyWorkflowRunInProgress",
+    "runProgress",
+  ]);
+  if (runProgress?.status === "running" || difyWorkflowRunInProgress) {
     stopDifyBgWaitPoll();
-    const last = d.lastDifyRun;
-    if (last?.ok) {
-      setStatus("已完成 · CSV 已下载");
-    } else if (last && last.ok === false) {
-      setStatus(String(last.error || "失败"), true);
-    } else {
-      setStatus("");
-    }
-    await loadLogs();
-  }, 800);
+    difyBgWaitPollId = setInterval(async () => {
+      await refreshStatusFromStorage();
+      const d = await chrome.storage.local.get(["difyWorkflowRunInProgress", "runProgress"]);
+      if (d.runProgress?.status === "running" || d.difyWorkflowRunInProgress) return;
+      stopDifyBgWaitPoll();
+      await loadLogs();
+    }, 800);
+  }
 }
 
 $("questions").addEventListener(
@@ -304,7 +588,7 @@ $("questions").addEventListener(
   { passive: true }
 );
 
-function setActiveTab(name) {
+function setActiveTab(name, persist = true) {
   const run = $("panelRun");
   const settings = $("panelSettings");
   const tRun = $("tabRun");
@@ -327,6 +611,30 @@ function setActiveTab(name) {
     tRun.setAttribute("aria-selected", "true");
     tSet.setAttribute("aria-selected", "false");
   }
+  if (persist) {
+    chrome.storage.local.set({ uiActiveTab: name === "settings" ? "settings" : "run" }).catch(() => {});
+  }
+}
+
+/** 打开 popup / 侧边栏时从 storage 恢复界面，避免关面板后进度文案丢失 */
+async function restoreUiFromStorage() {
+  const data = await chrome.storage.local.get([
+    "lastQuestions",
+    "uiActiveTab",
+    "runProgress",
+    "difyWorkflowRunInProgress",
+    "lastDifyRun",
+  ]);
+
+  if (typeof data.lastQuestions === "string" && data.lastQuestions.trim()) {
+    $("questions").value = data.lastQuestions;
+  }
+
+  const tab = data.uiActiveTab === "settings" ? "settings" : "run";
+  setActiveTab(tab, false);
+
+  await syncJobUiFromBackground();
+  await resumeDifyJobIfBackgroundBusy();
 }
 
 function initTabs() {
@@ -334,9 +642,23 @@ function initTabs() {
   $("tabSettings")?.addEventListener("click", () => setActiveTab("settings"));
 }
 
-loadDifySettings()
-  .then(() => resumeDifyJobIfBackgroundBusy())
+restoreUiFromStorage()
+  .then(() => loadDifySettings())
   .catch(() => {});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.runProgress?.newValue) {
+    applyRunProgress(changes.runProgress.newValue);
+  }
+  if (changes.difyWorkflowRunInProgress?.newValue === true) {
+    setStatus("采集已完成，正在执行 Dify 工作流（请稍候）…");
+    updateJobUi(true);
+  }
+  if (changes.difyWorkflowRunInProgress?.newValue === false) {
+    syncJobUiFromBackground().catch(() => {});
+  }
+});
 
 initTabs();
 
@@ -350,5 +672,10 @@ for (const id of difyIds) {
   });
   node.addEventListener("blur", () => persistDifySettings());
 }
+
+$("difyWorkflowEnabled")?.addEventListener("change", () => {
+  persistDifySettings();
+  popupTrace("已更新 Dify 设置", { id: "difyWorkflowEnabled" });
+});
 
 loadLogs();

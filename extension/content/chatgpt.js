@@ -5,6 +5,19 @@
 
   const HOSTS = ["chatgpt.com", "www.chatgpt.com", "chat.openai.com"];
 
+  let questionRunLock = Promise.resolve();
+
+  /**
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  function withQuestionLock(fn) {
+    const run = questionRunLock.then(fn);
+    questionRunLock = run.catch(() => {});
+    return run;
+  }
+
   function sleep(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
@@ -112,7 +125,48 @@
       aria: el.getAttribute("aria-label"),
     });
     el.click();
-    await sleep(1500);
+    await sleep(1000);
+    if (isGenerating()) {
+      await waitUntil(() => !isGenerating(), 45000, 300).catch(() => {});
+    }
+    await sleep(300);
+  }
+
+  /**
+   * @param {HTMLElement} el
+   * @returns {string}
+   */
+  function getPromptText(el) {
+    if (el instanceof HTMLTextAreaElement) return (el.value || "").trim();
+    return (el.innerText || el.textContent || "").trim();
+  }
+
+  /**
+   * @param {HTMLElement} el
+   */
+  async function clearPromptEditor(el) {
+    await setPromptText(el, "");
+    await sleep(120);
+    if (getPromptText(el).length > 0) {
+      el.focus();
+      try {
+        document.execCommand("selectAll", false);
+        document.execCommand("delete", false);
+      } catch (_) {
+        el.textContent = "";
+      }
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      await sleep(120);
+    }
+  }
+
+  async function waitForGenerationEnd(maxMs = 180000) {
+    if (!isGenerating()) {
+      await sleep(200);
+      return;
+    }
+    await waitUntil(() => !isGenerating(), maxMs, 400);
+    await sleep(400);
   }
 
   /**
@@ -255,7 +309,7 @@
       });
     }
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    await sleep(500);
+    await sleep(200);
   }
 
   function scrollAssistantIntoView(assistantRoot) {
@@ -283,12 +337,21 @@
   function extractAssistantMessageText(assistantRoot) {
     if (!assistantRoot) return "";
 
+    const mdFn = globalThis.aiAutoChatHtmlToMarkdown;
     const rawBlocks = /** @type {HTMLElement[]} */ (
       [...assistantRoot.querySelectorAll("div.markdown.prose, div.markdown, .markdown.prose")]
     );
     const blocks = rawBlocks.filter((el) => {
       return !rawBlocks.some((other) => other !== el && other.contains(el));
     });
+    if (blocks.length > 0 && typeof mdFn === "function") {
+      const merged = blocks
+        .map((el) => mdFn(el))
+        .filter(Boolean)
+        .join("\n\n")
+        .trim();
+      if (merged.length > 40) return merged;
+    }
     if (blocks.length > 0) {
       const merged = blocks
         .map((el) => (el.innerText || "").replace(/\s+\n/g, "\n").trim())
@@ -353,22 +416,64 @@
   }
 
   /**
-   * @param {string} _userQuestion
+   * @param {number} baselineAssistantCount
    */
-  async function waitForAnswerStable(_userQuestion) {
+  function getAnswerSnapshot(baselineAssistantCount) {
+    const root = /** @type {HTMLElement} */ (findConversationRoot());
+    const nodes = collectAssistantRoots();
+    const last =
+      nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : null;
+    scrollAssistantIntoView(last);
+    const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+    const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
+    return {
+      ok: true,
+      generating: isGenerating(),
+      assistantCount,
+      baselineAssistantCount,
+      text,
+      pageUrl: location.href,
+    };
+  }
+
+  /**
+   * @param {number} baselineAssistantCount
+   */
+  function finalizeAnswer(baselineAssistantCount) {
+    const root = /** @type {HTMLElement} */ (findConversationRoot());
+    const nodes = collectAssistantRoots();
+    const last =
+      nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
+    scrollAssistantIntoView(last);
+    const text = extractAssistantMessageText(last) || (last.innerText || "").trim();
+    const citations = extractCitationsFrom(last || root);
+    return {
+      ok: true,
+      answer: text,
+      citations,
+      pageUrl: location.href,
+      baselineAssistantCount,
+    };
+  }
+
+  /**
+   * @param {string} _userQuestion
+   * @param {number} baselineAssistantCount
+   */
+  async function waitForAnswerStable(_userQuestion, baselineAssistantCount = 0) {
     const root = /** @type {HTMLElement} */ (findConversationRoot());
 
-    /** 留出时间让「停止生成」等控件出现，避免误判为已结束（各语言界面均适用） */
-    await sleep(900);
+    await sleep(400);
+    await waitUntil(() => isGenerating(), 8000, 200).catch(() => {});
     await waitUntil(() => !isGenerating(), 180000, 400);
-    await sleep(900);
+    await sleep(500);
+    await waitForGenerationEnd();
 
     let lastText = "";
     let stableTicks = 0;
-    /** 过短正文不参与「稳定」判定，避免空串/占位符连续命中提前返回 */
     const minStableLen = 12;
 
-    for (let i = 0; i < 180; i++) {
+    for (let i = 0; i < 200; i++) {
       await sleep(320);
       const nodes = collectAssistantRoots();
       const last =
@@ -377,7 +482,14 @@
           : null;
       scrollAssistantIntoView(last);
       await sleep(120);
+      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
       const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
+
+      if (assistantCount <= baselineAssistantCount && text.length < minStableLen) {
+        stableTicks = 0;
+        lastText = text;
+        continue;
+      }
 
       if (text.length < minStableLen) {
         stableTicks = 0;
@@ -385,11 +497,17 @@
         continue;
       }
 
+      if (isGenerating()) {
+        stableTicks = 0;
+        continue;
+      }
+
       if (text === lastText) stableTicks += 1;
       else stableTicks = 0;
       lastText = text;
 
-      if (stableTicks >= 10 && !isGenerating()) {
+      if (stableTicks >= 12 && !isGenerating()) {
+        await waitForGenerationEnd();
         scrollAssistantIntoView(last);
         await sleep(200);
         const finalText =
@@ -411,66 +529,95 @@
    * @param {{ question: string, newChat: boolean }} opts
    */
   async function runOneQuestion(opts) {
-    trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
+    return withQuestionLock(async () => {
+      trace("info", "runOneQuestion 开始", { url: location.href, newChat: opts.newChat });
 
-    if (!isChatGPTPage()) throw new Error("不在 ChatGPT 页面");
+      if (!isChatGPTPage()) throw new Error("不在 ChatGPT 页面");
 
-    await waitForPageReady();
+      await waitForPageReady();
+      if (isGenerating()) await waitForGenerationEnd();
 
-    if (opts.newChat) {
-      await startNewChat();
-    }
-
-    trace("info", "查找输入框");
-    const editor = await waitFor(() => findPromptEditor(), 28000, 200);
-    trace("info", "找到输入框", {
-      tag: editor.tagName,
-      id: editor.id,
-      role: editor.getAttribute("role"),
-    });
-
-    await setPromptText(editor, opts.question);
-    await sleep(200);
-
-    let send = findSendButton();
-    if (!send) {
-      try {
-        send = await waitFor(() => findSendButton(), 12000, 200);
-      } catch (_) {
-        send = null;
+      if (opts.newChat) {
+        await startNewChat();
       }
-    }
-    if (send) {
-      trace("info", "点击发送", {
-        testid: send.getAttribute("data-testid"),
-        aria: send.getAttribute("aria-label"),
+
+      trace("info", "查找输入框");
+      const editor = await waitFor(() => findPromptEditor(), 28000, 200);
+      if (getPromptText(editor).length > 0) {
+        await clearPromptEditor(editor);
+      }
+
+      trace("info", "找到输入框", {
+        tag: editor.tagName,
+        id: editor.id,
+        role: editor.getAttribute("role"),
       });
-      send.click();
-    } else {
-      trace("warn", "未找到发送按钮，尝试 Enter");
-      editor.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Enter",
-          code: "Enter",
-          bubbles: true,
-          cancelable: true,
-        })
-      );
-    }
 
-    trace("info", "等待模型回复结束");
-    const { text, element } = await waitForAnswerStable(opts.question);
-    trace("info", "采集完成", { answerLen: text.length });
-    const citations = extractCitationsFrom(element || findConversationRoot());
+      const baselineAssistantCount = document.querySelectorAll(
+        '[data-message-author-role="assistant"]'
+      ).length;
 
-    return {
-      answer: text,
-      citations,
-      pageUrl: location.href,
-    };
+      await setPromptText(editor, opts.question);
+      await sleep(250);
+
+      let send = findSendButton();
+      if (!send) {
+        try {
+          send = await waitFor(() => findSendButton(), 12000, 200);
+        } catch (_) {
+          send = null;
+        }
+      }
+      if (send) {
+        trace("info", "点击发送", {
+          testid: send.getAttribute("data-testid"),
+          aria: send.getAttribute("aria-label"),
+        });
+        send.click();
+      } else {
+        trace("warn", "未找到发送按钮，尝试 Enter");
+        editor.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            code: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      }
+
+      trace("info", "等待模型回复结束");
+      if (opts.submitOnly) {
+        return {
+          submitted: true,
+          baselineAssistantCount,
+          pageUrl: location.href,
+        };
+      }
+
+      const { text, element } = await waitForAnswerStable(opts.question, baselineAssistantCount);
+      trace("info", "采集完成", { answerLen: text.length });
+      const citations = extractCitationsFrom(element || findConversationRoot());
+
+      return {
+        answer: text,
+        citations,
+        pageUrl: location.href,
+      };
+    });
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === "CHATGPT_POLL_ANSWER") {
+      const baseline = Number(msg.payload?.baselineAssistantCount ?? 0);
+      sendResponse(getAnswerSnapshot(baseline));
+      return false;
+    }
+    if (msg?.type === "CHATGPT_FINALIZE_ANSWER") {
+      const baseline = Number(msg.payload?.baselineAssistantCount ?? 0);
+      sendResponse(finalizeAnswer(baseline));
+      return false;
+    }
     if (msg?.type !== "CHATGPT_RUN_QUESTION") return false;
 
     trace("info", "收到 CHATGPT_RUN_QUESTION", { index: msg.payload?.index });
@@ -481,6 +628,7 @@
         const out = await runOneQuestion({
           question: String(payload.question || ""),
           newChat: Boolean(payload.newChat),
+          submitOnly: Boolean(payload.submitOnly),
         });
         sendResponse({ ok: true, ...out });
       } catch (e) {

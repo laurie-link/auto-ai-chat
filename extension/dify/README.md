@@ -20,13 +20,11 @@
 
 ## 说明
 
-- 当前 DSL 使用 **文档提取器 + 代码节点** 做品牌命中统计，**不依赖外部 LLM**，导入即可跑通。
-- 若需语义分析，可在 Dify 里在「文档提取器」与「结束」之间再加 **LLM** 节点，并把结束节点的 `csv_report` 改接 LLM 输出。
+- **推荐导入** `brand-visibility-workflow-llm.yml`：含 LLM 品牌分析；CSV 表头与扩展占位 CSV 一致（含 Citations / Page URL / Captured At）。
+- 采集成功但 Dify 失败时，扩展会自动下载**同表头占位 CSV**（LLM 列为空），可用侧边栏「上传占位 CSV 补跑 Dify」补全。
+- 扩展侧超过 29 条自动分批上传 Dify，避免迭代上限导致整批失败。
 - 导入后 API Key 与旧服务器不同，扩展里 401 时需更新 Key。
 
 ## 关闭自动上传 Dify
 
-`Z:\临时\extension` 版本会在每次打开弹窗时执行 `difyWorkflowEnabled: true`。若只想本地采集：
-
-- 在 `popup.js` 的 `loadDifySettings` / `persistDifySettings` 中去掉强制 `true`，或
-- 使用本仓库 `extension/` 中带复选框「采集完成后自动跑 Dify」的版本。
+运行页勾选 **「采集完成后自动上传 Dify」** 即可控制是否在采集结束后调用 Dify 工作流。取消勾选后仅本地采集，不会上传 Dify。
