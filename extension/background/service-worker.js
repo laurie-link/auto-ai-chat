@@ -13,12 +13,7 @@ import {
   parseBrandReportCsvToResults,
 } from "../lib/brand-report-csv.js";
 import * as XLSX from "../vendor/xlsx.mjs";
-
-/** 与 popup 中 DIFY_DEFAULTS 保持一致，供未写入 storage 时使用 */
-const DIFY_DEFAULTS = {
-  difyBaseUrl: "https://dify.aiexplorerxj.top",
-  difyApiKey: "app-JGuIE0oeaKEguRu3FV79dtm8",
-};
+import { DIFY_DEFAULTS, migrateBundledDifyApiKey } from "../lib/dify-settings.js";
 
 const GEMINI_ORIGIN = "https://gemini.google.com";
 const GEMINI_CS_FILE = "content/gemini.js";
@@ -511,7 +506,11 @@ function initSidePanel() {
 }
 
 initSidePanel();
-chrome.runtime.onInstalled.addListener(() => initSidePanel());
+chrome.runtime.onInstalled.addListener(() => {
+  void initSidePanel();
+  void migrateBundledDifyApiKey();
+});
+void migrateBundledDifyApiKey();
 void reconcileStaleJobStateOnStartup();
 
 /**

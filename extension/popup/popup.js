@@ -2,9 +2,22 @@ const $ = (id) => document.getElementById(id);
 
 const DIFY_DEFAULTS = {
   difyBaseUrl: "https://dify.aiexplorerxj.top",
-  difyApiKey: "app-JGuIE0oeaKEguRu3FV79dtm8",
+  difyApiKey: "app-kmyivo1GHp5879hsCU8Yd06V",
   difyApiUser: "ai-autochat-extension",
 };
+
+/** 与 lib/dify-settings.js 保持一致；递增会强制覆盖 storage 中的 API Key */
+const DIFY_API_KEY_REVISION = 1;
+
+async function migrateBundledDifyApiKey() {
+  const data = await chrome.storage.local.get(["difyApiKeyRevision"]);
+  const rev = Number(data.difyApiKeyRevision) || 0;
+  if (rev >= DIFY_API_KEY_REVISION) return;
+  await chrome.storage.local.set({
+    difyApiKey: DIFY_DEFAULTS.difyApiKey,
+    difyApiKeyRevision: DIFY_API_KEY_REVISION,
+  });
+}
 
 function parseQuestions(raw) {
   return raw
@@ -154,6 +167,7 @@ function setRunButtonsDisabled(disabled) {
 }
 
 async function loadDifySettings() {
+  await migrateBundledDifyApiKey();
   const data = await chrome.storage.local.get([
     "difyBaseUrl",
     "difyApiKey",
@@ -644,6 +658,7 @@ function initTabs() {
 
 restoreUiFromStorage()
   .then(() => loadDifySettings())
+  .then(() => loadPlatformSelection())
   .catch(() => {});
 
 chrome.storage.onChanged.addListener((changes, area) => {
