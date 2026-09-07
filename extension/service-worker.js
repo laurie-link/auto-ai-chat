@@ -10,7 +10,7 @@ import * as XLSX from "../vendor/xlsx.mjs";
 /** 与 popup 中 DIFY_DEFAULTS 保持一致，供未写入 storage 时使用 */
 const DIFY_DEFAULTS = {
   difyBaseUrl: "https://dify.aiexplorerxj.top",
-  difyApiKey: "app-JGuIE0oeaKEguRu3FV79dtm8",
+  difyApiKey: "app-D5vlQS4icTLzHa6JH0Wqrrbx",
 };
 
 const GEMINI_ORIGIN = "https://gemini.google.com";

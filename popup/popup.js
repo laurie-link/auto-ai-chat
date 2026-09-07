@@ -2,12 +2,12 @@ const $ = (id) => document.getElementById(id);
 
 const DIFY_DEFAULTS = {
   difyBaseUrl: "https://dify.aiexplorerxj.top",
-  difyApiKey: "app-kmyivo1GHp5879hsCU8Yd06V",
+  difyApiKey: "app-D5vlQS4icTLzHa6JH0Wqrrbx",
   difyApiUser: "ai-autochat-extension",
 };
 
 /** 与 lib/dify-settings.js 保持一致；递增会强制覆盖 storage 中的 API Key */
-const DIFY_API_KEY_REVISION = 1;
+const DIFY_API_KEY_REVISION = 2;
 
 async function migrateBundledDifyApiKey() {
   const data = await chrome.storage.local.get(["difyApiKeyRevision"]);
