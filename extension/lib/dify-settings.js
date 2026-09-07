@@ -3,12 +3,12 @@
  */
 export const DIFY_DEFAULTS = {
   difyBaseUrl: "https://dify.aiexplorerxj.top",
-  difyApiKey: "app-D5vlQS4icTLzHa6JH0Wqrrbx",
+  difyApiKey: "app-kmyivo1GHp5879hsCU8Yd06V",
   difyApiUser: "ai-autochat-extension",
 };
 
 /** 递增后：已安装用户下次启动/打开侧边栏时，storage 里的 API Key 会被替换为 DIFY_DEFAULTS.difyApiKey */
-export const DIFY_API_KEY_REVISION = 2;
+export const DIFY_API_KEY_REVISION = 3;
 
 /**
  * 将 bundled API Key 写入 storage（覆盖旧值与缓存）。
