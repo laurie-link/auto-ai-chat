@@ -63,20 +63,27 @@
   }
 
   /**
+   * 穿透 shadow DOM 的查询。用 Set 去重：对每个节点都跑一次
+   * `node.querySelectorAll` 会把同一个元素按祖先层数重复收集（实测同一输入框
+   * 被收集 25 次），而该函数在 200ms 级轮询里被反复调用。
+   *
    * @param {ParentNode} root
    * @param {string} selector
    * @returns {Element[]}
    */
   function querySelectorAllDeep(selector, root = document) {
-    /** @type {Element[]} */
-    const found = [];
+    /** @type {Set<Element>} */
+    const found = new Set();
+    /** @type {Set<Node>} */
+    const visited = new Set();
     const queue = [root];
     while (queue.length) {
       const node = queue.shift();
-      if (!node) continue;
+      if (!node || visited.has(node)) continue;
+      visited.add(node);
       try {
         if ("querySelectorAll" in node && typeof node.querySelectorAll === "function") {
-          found.push(...node.querySelectorAll(selector));
+          for (const el of node.querySelectorAll(selector)) found.add(el);
         }
       } catch (_) {
         /* ignore */
@@ -89,7 +96,7 @@
         if (el.shadowRoot) queue.push(el.shadowRoot);
       }
     }
-    return found;
+    return [...found];
   }
 
   /**
@@ -284,23 +291,50 @@
   }
 
   /**
-   * 发送：`main button.send-button`；生成中同一按钮会加 `.stop`，此时不作为「发送」。
-   * Playwright MCP 实测：流式时 class 含 `send-button` 与 `stop`。
+   * composer 主操作位（发送 / 停止）的 aria-label。2026 版已移除 `button.send-button`
+   * 与 `.stop` 类（实测整个页面 0 个 `button.send-button`），改为 icon button：
+   * 输入框有内容时出现 `aria-label="Send message"`，流式中同一位置换成
+   * `aria-label="Stop response"`。输入框为空时这两个按钮都不存在。
+   */
+  const SEND_LABEL_RE = /send|发送|送信|전송|enviar|envoyer|senden|invia|отправить/i;
+  const STOP_LABEL_RE =
+    /stop|停止|중지|정지|やめる|detener|arrêter|anhalten|interrompi|остановить/i;
+
+  /**
+   * @param {RegExp} re
+   * @returns {HTMLButtonElement | null}
+   */
+  function findComposerAction(re) {
+    const scope = document.querySelector("main") || document;
+    for (const b of scope.querySelectorAll("button")) {
+      if (!(b instanceof HTMLButtonElement) || !isVisible(b)) continue;
+      const label = (b.getAttribute("aria-label") || "").trim();
+      if (label && re.test(label)) return b;
+    }
+    return null;
+  }
+
+  /**
+   * 发送：优先 2026 版主操作位（aria 文案）；旧版 `button.send-button` 仍作兜底。
    *
    * @returns {HTMLElement | null}
    */
   function findSendButton() {
-    const b = document.querySelector("main button.send-button");
-    if (!(b instanceof HTMLButtonElement)) return null;
-    if (!isVisible(b) || b.disabled) return null;
-    if (b.classList.contains("stop")) return null;
-    return b;
+    const b = findComposerAction(SEND_LABEL_RE);
+    if (b) return b.disabled ? null : b;
+
+    const legacy = document.querySelector("main button.send-button");
+    if (!(legacy instanceof HTMLButtonElement)) return null;
+    if (!isVisible(legacy) || legacy.disabled) return null;
+    if (legacy.classList.contains("stop")) return null;
+    return legacy;
   }
 
   /**
-   * 生成中：同一 `send-button` 带 `.stop`（与 aria「Stop response」等语言无关）。
+   * 生成中：主操作位是「停止」。
    */
   function isGenerating() {
+    if (findComposerAction(STOP_LABEL_RE)) return true;
     const b = document.querySelector("main button.send-button");
     return b instanceof HTMLButtonElement && isVisible(b) && b.classList.contains("stop");
   }

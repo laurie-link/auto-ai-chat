@@ -232,42 +232,56 @@
     el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
   }
 
+  /** 主操作位（发送 / 停止）的 aria-label；界面语言不同，用多语言子串匹配。 */
+  const SEND_LABEL_RE = /send|submit|发送|送信|전송|enviar|envoyer|senden|invia|отправить/i;
+  const STOP_LABEL_RE = /stop|停止|중지|정지|やめる|detener|arrêter|anhalten|interrompi|остановить/i;
+  const VOICE_LABEL_RE =
+    /voice|dictate|microphone|speech|语音|听写|口述|音声|음성|voz|dictado|vocal/i;
+
   /**
-   * 发送：composer 行内最后一个主按钮；就绪时需可点（未处于回答完成后的灰显 Submit）。
+   * 发送：composer 行内最后一个主按钮。
+   *
+   * 空输入框时该位置是麦克风（实测 `aria-label="Use voice mode"`），必须排除，
+   * 否则会把提问点成录音。
    *
    * @returns {HTMLElement | null}
    */
   function findSendButton() {
     const b = findComposerPrimaryButton();
     if (!b || b.disabled) return null;
+    const label = (b.getAttribute("aria-label") || "").trim();
+    if (label && VOICE_LABEL_RE.test(label)) return null;
+    if (label && !SEND_LABEL_RE.test(label) && !STOP_LABEL_RE.test(label)) return null;
     const cls = b.className || "";
     if (cls.includes("pointer-events-none") && cls.includes("opacity-50")) return null;
     return b;
   }
 
   /**
-   * 生成中：不依赖 aria「Stop/停止」。
-   * 完成后主按钮多为 disabled + opacity-50 + pointer-events-none + cursor-default；
-   * 流式中主按钮可点且输入区通常已空；用户正在输入下一题时输入区非空，视为非生成。
+   * 生成中的「停止」按钮（实测流式时主操作位为 `aria-label="Stop response (Esc)"`）。
+   *
+   * 之前按 class（`opacity-50` / `pointer-events-none` / `cursor-default`）判断，
+   * 实测流式与空闲时这些 class 都命中，导致 `isGenerating()` 恒为 false、
+   * 稳定性判据退化成「文本 3.8s 不变」，长回答中途停顿就会被提前截断。
+   *
+   * @returns {HTMLButtonElement | null}
    */
+  function findStopButton() {
+    const scope = document.querySelector("main") || document;
+    for (const b of scope.querySelectorAll("button")) {
+      if (!(b instanceof HTMLButtonElement) || !isVisible(b)) continue;
+      const label = (b.getAttribute("aria-label") || "").trim();
+      if (label && STOP_LABEL_RE.test(label)) return b;
+    }
+    return null;
+  }
+
   function isGenerating() {
+    if (findStopButton()) return true;
     const marker = document.querySelector(
       'main [data-streaming="true"], main [data-testid*="stream" i], main [class*="result-streaming"]'
     );
-    if (marker instanceof HTMLElement && isVisible(marker)) return true;
-
-    const b = findComposerPrimaryButton();
-    if (!b) return false;
-    const cls = b.className || "";
-    if (b.disabled && cls.includes("opacity-50") && cls.includes("pointer-events-none")) return false;
-
-    const ask = document.querySelector("#ask-input");
-    const typed = (ask && (ask.innerText || ask.textContent || "").trim()) || "";
-    if (typed.length > 0) return false;
-
-    if (cls.includes("opacity-50") && cls.includes("pointer-events-none")) return false;
-    if (cls.includes("cursor-default")) return false;
-    return !b.disabled;
+    return marker instanceof HTMLElement && isVisible(marker);
   }
 
   /**
@@ -278,12 +292,30 @@
   }
 
   /**
+   * 已渲染的答案块（每条回答一个 `main .prose`）。只取**可见**的：Perplexity 是
+   * SPA，切换会话时旧会话可能仍留在 DOM 里，算进来会把上一轮答案当成本轮结果。
+   *
+   * @returns {HTMLElement[]}
+   */
+  function visibleProses() {
+    const main = document.querySelector("main");
+    if (!main) return [];
+    return /** @type {HTMLElement[]} */ (
+      [...main.querySelectorAll(".prose")].filter(
+        (el) => el instanceof HTMLElement && isVisible(el)
+      )
+    );
+  }
+
+  function proseCount() {
+    return visibleProses().length;
+  }
+
+  /**
    * @returns {HTMLElement[]}
    */
   function collectAssistantRoots() {
-    const main = document.querySelector("main");
-    if (!main) return [];
-    const proses = /** @type {HTMLElement[]} */ ([...main.querySelectorAll(".prose")]);
+    const proses = visibleProses();
     if (proses.length) {
       return [proses[proses.length - 1]];
     }
@@ -305,6 +337,46 @@
       out.push(href);
     });
     return out;
+  }
+
+  /**
+   * @param {number} baselineProseCount
+   */
+  function getAnswerSnapshot(baselineProseCount) {
+    const root = /** @type {HTMLElement} */ (findConversationRoot());
+    const nodes = collectAssistantRoots();
+    const last =
+      nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : null;
+    const rendered = proseCount();
+    const text =
+      extractAssistantMarkdown(last) || (last?.innerText || "").trim() || (root.innerText || "").trim();
+    return {
+      ok: true,
+      generating: isGenerating(),
+      proseCount: rendered,
+      baselineProseCount,
+      text,
+      pageUrl: location.href,
+    };
+  }
+
+  /**
+   * @param {number} baselineProseCount
+   */
+  function finalizeAnswer(baselineProseCount) {
+    const root = /** @type {HTMLElement} */ (findConversationRoot());
+    const nodes = collectAssistantRoots();
+    const last =
+      nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
+    const text = extractAssistantMarkdown(last) || (last.innerText || "").trim();
+    const citations = extractCitationsFrom(last || root);
+    return {
+      ok: true,
+      answer: text,
+      citations,
+      pageUrl: location.href,
+      baselineProseCount,
+    };
   }
 
   /**
@@ -331,11 +403,13 @@
         nodes.length > 0
           ? /** @type {HTMLElement} */ (nodes[nodes.length - 1])
           : null;
-      const proseCount = document.querySelectorAll("main .prose").length;
+      const rendered = proseCount();
       const text =
         extractAssistantMarkdown(last) || (last?.innerText || "").trim() || (root.innerText || "").trim();
 
-      if (proseCount <= baselineProseCount && text.length < minStableLen) {
+      // 本轮答案还没落地。此处**不能**退回上一轮的 `.prose`：同一会话里上一条回答
+      // 又长又稳定，会被当成本轮结果直接上传。
+      if (rendered <= baselineProseCount) {
         stableTicks = 0;
         lastText = text;
         continue;
@@ -366,6 +440,9 @@
     const nodes = collectAssistantRoots();
     const last =
       nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
+    if (proseCount() <= baselineProseCount) {
+      throw new Error("等待回答超时：未出现新的回答");
+    }
     const text = extractAssistantMarkdown(last) || (last.innerText || "").trim();
     return { text, element: last };
   }
@@ -401,7 +478,7 @@
 
       trace("info", "找到输入框", { tag: editor.tagName, id: editor.id });
 
-      const baselineProseCount = document.querySelectorAll("main .prose").length;
+      const baselineProseCount = proseCount();
 
       await setPromptText(editor, opts.question);
       await sleep(250);
@@ -425,6 +502,14 @@
       }
 
       trace("info", "等待回答");
+      if (opts.submitOnly) {
+        return {
+          submitted: true,
+          baselineProseCount,
+          pageUrl: location.href,
+        };
+      }
+
       const { text, element } = await waitForAnswerStable(opts.question, baselineProseCount);
       trace("info", "采集完成", { answerLen: text.length });
       const citations = extractCitationsFrom(element || findConversationRoot());
@@ -438,6 +523,16 @@
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === "PERPLEXITY_POLL_ANSWER") {
+      const baseline = Number(msg.payload?.baselineProseCount ?? 0);
+      sendResponse(getAnswerSnapshot(baseline));
+      return false;
+    }
+    if (msg?.type === "PERPLEXITY_FINALIZE_ANSWER") {
+      const baseline = Number(msg.payload?.baselineProseCount ?? 0);
+      sendResponse(finalizeAnswer(baseline));
+      return false;
+    }
     if (msg?.type !== "PERPLEXITY_RUN_QUESTION") return false;
 
     trace("info", "收到 PERPLEXITY_RUN_QUESTION", { index: msg.payload?.index });
@@ -448,6 +543,7 @@
         const out = await runOneQuestion({
           question: String(payload.question || ""),
           newChat: Boolean(payload.newChat),
+          submitOnly: Boolean(payload.submitOnly),
         });
         sendResponse({ ok: true, ...out });
       } catch (e) {

@@ -93,8 +93,34 @@
   }
 
   /**
-   * 新建对话：优先 ChatGPT 稳定 data-testid（Playwright MCP 实测 chatgpt.com 2026）。
-   * 顺序：create-new-chat-button → sidebar-new-chat → new-chat-button。
+   * 取**最后一个可见**的匹配元素。
+   *
+   * 从对话页点「New chat」时，ChatGPT 不会卸载旧对话：旧 `main` / 旧 composer 会以
+   * 0×0 的尺寸留在 DOM 里，新视图挂在**后面**。`querySelector` 只返回文档序第一个，
+   * 于是永远命中那个已废弃的隐藏节点，表现为「找不到输入框 / 发送按钮超时」。
+   *
+   * @param {string} selector
+   * @param {ParentNode} [scope]
+   * @returns {HTMLElement | null}
+   */
+  function lastVisible(selector, scope = document) {
+    const all = scope.querySelectorAll(selector);
+    for (let i = all.length - 1; i >= 0; i--) {
+      const el = all[i];
+      if (el instanceof HTMLElement && isVisible(el)) return el;
+    }
+    return null;
+  }
+
+  /**
+   * 新建对话。2026 版 chatgpt.com 已移除全部 data-testid，侧栏导航列表
+   * （`[data-appearance="plain"]` 里的首个按钮）即「新开对话」；文本/语言无关，
+   * 因此用结构定位，data-testid 仅作旧版回退。
+   *
+   * 展开与收起是**两套并存**的元素树，易踩两个坑：
+   * 1. 展开态外层是 `nav[role=navigation]`，收起态是 `nav[aria-label="Show sidebar"]`（无 role）
+   *    —— 不能用 role 限定；收起态按钮只有 36px —— 不能要求宽度。
+   * 2. 文档序里第一个匹配常常是「当前隐藏的那一套」，必须取**第一个可见的**。
    *
    * @returns {HTMLElement | null}
    */
@@ -108,7 +134,13 @@
       const el = document.querySelector(`[data-testid="${id}"]`);
       if (el instanceof HTMLElement && isVisible(el)) return el;
     }
-    /** 无 testid 的旧版：侧栏会话列表上方第一条「新开对话」常为 ul 首项链到 / */
+    const navButtons = document.querySelectorAll(
+      '#app-shell-sidebar [data-appearance="plain"] button, [data-appearance="plain"] button'
+    );
+    for (const btn of navButtons) {
+      if (btn instanceof HTMLElement && isVisible(btn)) return btn;
+    }
+    /** 更早版本：侧栏会话列表上方第一条「新开对话」常为 ul 首项链到 / */
     const sidebarFirst = document.querySelector(
       "aside [role=\"navigation\"] ul > li:first-child a[href=\"/\"], aside nav ul > li:first-child a[href=\"/\"]"
     );
@@ -116,8 +148,23 @@
     return null;
   }
 
+  function isFreshChatPage() {
+    try {
+      if (location.pathname !== "/") return false;
+    } catch (_) {
+      return false;
+    }
+    if (countAssistantMessages() > 0) return false;
+    return findPromptEditor() !== null;
+  }
+
   async function startNewChat() {
-    trace("info", "startNewChat: 查找 data-testid create-new-chat / sidebar-new-chat");
+    trace("info", "startNewChat: 查找侧栏新开对话按钮");
+    if (isFreshChatPage()) {
+      trace("info", "startNewChat: 已在新建对话页，跳过点击");
+      await sleep(200);
+      return;
+    }
     const el = await waitFor(() => findNewChatButton(), 22000, 250);
     trace("info", "startNewChat: 点击", {
       tag: el.tagName,
@@ -170,21 +217,27 @@
   }
 
   /**
-   * 主输入区：`#prompt-textarea`（多为 ProseMirror div + role=textbox），与界面语言无关。
+   * 主输入区。2026 版没有 `#prompt-textarea` 了：输入框是
+   * `form[data-chatgpt-composer]` 内一个无 id 的 `div.ProseMirror[contenteditable][role=textbox]`。
    * 回退：name / 主区域可见 textarea / 可见 contenteditable textbox（仍用结构，不用文案）。
    *
    * @returns {HTMLElement | null}
    */
   function findPromptEditor() {
-    const byId = document.querySelector("#prompt-textarea");
-    if (byId instanceof HTMLElement && isVisible(byId)) {
-      return byId;
-    }
+    const byComposer = lastVisible(
+      "form[data-chatgpt-composer] [contenteditable=\"true\"][role=\"textbox\"], " +
+        "[contenteditable=\"true\"][role=\"textbox\"].ProseMirror, " +
+        "form[data-chatgpt-composer] .ProseMirror[contenteditable=\"true\"]"
+    );
+    if (byComposer) return byComposer;
 
-    const byName = document.querySelector('textarea[name="prompt-textarea"]');
-    if (byName instanceof HTMLElement && isVisible(byName)) return byName;
+    const byId = lastVisible("#prompt-textarea");
+    if (byId) return byId;
 
-    const main = document.querySelector("main");
+    const byName = lastVisible('textarea[name="prompt-textarea"]');
+    if (byName) return byName;
+
+    const main = lastVisible("main");
     if (main) {
       const tas = /** @type {HTMLTextAreaElement[]} */ ([...main.querySelectorAll("textarea")]);
       let best = /** @type {HTMLTextAreaElement | null} */ (null);
@@ -203,15 +256,16 @@
       const editables = /** @type {HTMLElement[]} */ (
         [...main.querySelectorAll('[role="textbox"][contenteditable="true"], .ProseMirror[contenteditable="true"]')]
       );
-      for (const el of editables) {
+      for (let i = editables.length - 1; i >= 0; i--) {
+        const el = editables[i];
         if (isVisible(el) && el.getBoundingClientRect().width > 40) return el;
       }
     }
 
-    const pm = document.querySelector(
+    const pm = lastVisible(
       'div[contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"]'
     );
-    if (pm instanceof HTMLElement && isVisible(pm) && pm.getBoundingClientRect().width > 40) return pm;
+    if (pm && pm.getBoundingClientRect().width > 40) return pm;
 
     return null;
   }
@@ -251,26 +305,85 @@
   }
 
   /**
-   * 发送：`data-testid="send-button"`（有内容且可点时启用；与语言无关）。
+   * 发送。2026 版：输入框有内容时，composer 内才渲染一个 `button[type=submit]`
+   * （空输入框时该位置是「Start Voice」，所以不能只靠按钮位置判断）。
+   * 旧版回退 `data-testid="send-button"`。
    *
    * @returns {HTMLElement | null}
    */
   function findSendButton() {
-    const byTest = document.querySelector('[data-testid="send-button"]');
-    if (byTest instanceof HTMLButtonElement) {
-      if (byTest.disabled || !isVisible(byTest)) return null;
-      return byTest;
+    const byTest = lastVisible('[data-testid="send-button"]');
+    if (byTest) return byTest;
+
+    const form = lastVisible("form[data-chatgpt-composer]");
+    return lastVisible('button[type="submit"]', form || document);
+  }
+
+  /**
+   * 是否处于禁用态。发送按钮在文本写入后是**延迟几秒**才 enable 的（React 受控状态），
+   * 所以「找到按钮」和「按钮可点」必须分开判断。
+   *
+   * @param {HTMLElement} el
+   */
+  function isDisabled(el) {
+    return el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true";
+  }
+
+  /**
+   * 在输入框上派发一次真正的回车（composer 的 keydown 处理器认这个）。
+   *
+   * @param {HTMLElement} el
+   */
+  function pressEnter(el) {
+    el.focus();
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      el.dispatchEvent(
+        new KeyboardEvent(type, {
+          key: "Enter",
+          code: "Enter",
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
     }
-    if (byTest instanceof HTMLElement && isVisible(byTest)) return byTest;
+  }
+
+  /**
+   * 「停止」按钮的 aria-label 随界面语言变化，用子串匹配。注意**不能**用 `\b`：
+   * JS 的 `\b` 只认 ASCII 单词字符，`/^停止\b/` 在「停止」这种纯非 ASCII 文案上永不成立。
+   */
+  const STOP_LABEL_RE = /stop|cancel|停止|中止|终止|中断|정지|중지|やめる/i;
+
+  /**
+   * 生成中 composer 主操作位是 `aria-label="Stop"`（中文界面「停止」）的 `type=button`，
+   * 空闲时该位置是 `aria-label="Send"` 的 `type=submit`。
+   *
+   * 只认 aria-label，**不要**按 class 结构兜底：`size-token-button-composer` 是主操作位的
+   * 通用类，输入框为空时的「Start Voice」也带这个类，会被误判成「正在生成」而永久卡死。
+   *
+   * @returns {HTMLElement | null}
+   */
+  function findStopButton() {
+    const legacy = lastVisible('[data-testid="stop-button"]');
+    if (legacy) return legacy;
+
+    const form = lastVisible("form[data-chatgpt-composer]");
+    const scope = form || document;
+    for (const btn of scope.querySelectorAll("button")) {
+      if (!(btn instanceof HTMLElement) || !isVisible(btn)) continue;
+      const label = (btn.getAttribute("aria-label") || "").trim();
+      if (label && STOP_LABEL_RE.test(label)) return btn;
+    }
     return null;
   }
 
   /**
-   * 生成中：仅依赖 `data-testid="stop-button"` 可见（ChatGPT 各语言 UI 一致）。
+   * 生成中：composer 的发送按钮被「停止」按钮取代（两者同一位置、同样式）。
    */
   function isGenerating() {
-    const stop = document.querySelector('[data-testid="stop-button"]');
-    return stop instanceof HTMLElement && isVisible(stop);
+    return findStopButton() !== null;
   }
 
   /**
@@ -278,23 +391,49 @@
    */
   function findConversationRoot() {
     return (
-      document.querySelector("main") ||
-      document.querySelector('[role="presentation"]') ||
+      lastVisible("main") ||
+      lastVisible('[role="presentation"]') ||
       document.body
     );
+  }
+
+  /**
+   * 助手消息节点。2026 版移除了 `data-message-author-role`，改为在助手正文根节点上
+   * 标 `data-markdown-text-style="assistant-message"`（用户消息是 user-message）。
+   * 两个属性只会存在其一，故优先取旧版，避免将来同页并存时重复计数。
+   *
+   * @returns {HTMLElement[]}
+   */
+  function assistantMessageNodes() {
+    const pick = (sel) =>
+      /** @type {HTMLElement[]} */ (
+        [...document.querySelectorAll(sel)].filter(
+          (el) => el instanceof HTMLElement && isVisible(el)
+        )
+      );
+    // 只算可见节点：刚新建对话时旧对话仍以 0×0 挂在 DOM 里，算进去会让
+    // 「本轮是否已产出新回复」的基线从 0 变成 1，从而把旧答案当成本轮结果。
+    const legacy = pick('[data-message-author-role="assistant"]');
+    if (legacy.length) return legacy;
+    return pick('[data-markdown-text-style="assistant-message"]');
   }
 
   /**
    * @returns {HTMLElement[]}
    */
   function collectAssistantRoots() {
-    const byRole = /** @type {HTMLElement[]} */ (
-      [...document.querySelectorAll('[data-message-author-role="assistant"]')]
-    );
-    if (byRole.length) {
-      return [byRole[byRole.length - 1]];
+    const nodes = assistantMessageNodes();
+    if (nodes.length) {
+      return [nodes[nodes.length - 1]];
     }
     return [];
+  }
+
+  /**
+   * 已出现的助手消息条数（用于判断本轮是否已产出新回复）。
+   */
+  function countAssistantMessages() {
+    return assistantMessageNodes().length;
   }
 
   /**
@@ -312,6 +451,23 @@
     await sleep(200);
   }
 
+  /**
+   * 消息滚动容器不再是 `main`（2026 版 `main` 本身不滚动），改为就近找可滚动的祖先。
+   * @param {HTMLElement} el
+   * @returns {HTMLElement | null}
+   */
+  function findScrollContainer(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      const st = getComputedStyle(node);
+      if (/(auto|scroll)/.test(st.overflowY) && node.scrollHeight > node.clientHeight + 4) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return lastVisible("main");
+  }
+
   function scrollAssistantIntoView(assistantRoot) {
     if (!assistantRoot) return;
     try {
@@ -321,16 +477,36 @@
         assistantRoot.scrollIntoView(false);
       } catch (_) {}
     }
-    const main = document.querySelector("main");
-    if (main instanceof HTMLElement) {
+    const scroller = findScrollContainer(assistantRoot);
+    if (scroller) {
       try {
-        main.scrollTop = main.scrollHeight;
+        scroller.scrollTop = scroller.scrollHeight;
       } catch (_) {}
     }
   }
 
   /**
-   * 优先从正文 .markdown / .prose 取字。勿只用 querySelector 取「第一个」markdown：
+   * 助手正文根节点：2026 版是 `[data-markdown-text-style="assistant-message"]`
+   * （旧的 `div.markdown.prose` 已不存在）。同时把自身算进来，因为
+   * collectAssistantRoots 返回的就是正文根节点本身。
+   *
+   * @param {HTMLElement | null} assistantRoot
+   * @returns {HTMLElement[]}
+   */
+  function collectMarkdownRoots(assistantRoot) {
+    if (!assistantRoot) return [];
+    const sel =
+      '[data-markdown-text-style="assistant-message"], div.markdown.prose, div.markdown, .markdown.prose';
+    const found = /** @type {HTMLElement[]} */ ([]);
+    if (assistantRoot.matches(sel)) found.push(assistantRoot);
+    for (const el of assistantRoot.querySelectorAll(sel)) {
+      found.push(/** @type {HTMLElement} */ (el));
+    }
+    return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
+  }
+
+  /**
+   * 优先从正文根节点取字。勿只用 querySelector 取「第一个」markdown：
    * 带搜索/多段结构时首块常为 Short answer 摘要，会误判为全文并截断。
    * @param {HTMLElement | null} assistantRoot
    */
@@ -338,12 +514,7 @@
     if (!assistantRoot) return "";
 
     const mdFn = globalThis.aiAutoChatHtmlToMarkdown;
-    const rawBlocks = /** @type {HTMLElement[]} */ (
-      [...assistantRoot.querySelectorAll("div.markdown.prose, div.markdown, .markdown.prose")]
-    );
-    const blocks = rawBlocks.filter((el) => {
-      return !rawBlocks.some((other) => other !== el && other.contains(el));
-    });
+    const blocks = collectMarkdownRoots(assistantRoot);
     if (blocks.length > 0 && typeof mdFn === "function") {
       const merged = blocks
         .map((el) => mdFn(el))
@@ -361,7 +532,13 @@
       if (merged.length > 40) return merged;
     }
 
-    const proseSelectors = ['[class*="markdown"]', ".prose", '[class*="prose"]', "article"];
+    const proseSelectors = [
+      '[data-markdown-text-style="assistant-message"]',
+      '[class*="markdown"]',
+      ".prose",
+      '[class*="prose"]',
+      "article",
+    ];
     let best = "";
     for (const sel of proseSelectors) {
       try {
@@ -424,7 +601,7 @@
     const last =
       nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : null;
     scrollAssistantIntoView(last);
-    const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+    const assistantCount = countAssistantMessages();
     const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
     return {
       ok: true,
@@ -482,10 +659,12 @@
           : null;
       scrollAssistantIntoView(last);
       await sleep(120);
-      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
-      const text = extractAssistantMessageText(last) || (root.innerText || "").trim();
+      const assistantCount = countAssistantMessages();
+      const text = extractAssistantMessageText(last);
 
-      if (assistantCount <= baselineAssistantCount && text.length < minStableLen) {
+      // 没出现新的助手消息 = 本轮回复还没落地。此处**不能**退回 `root.innerText`：
+      // 那会把整页文案（含用户自己的提问）当成答案返回，静默产出垃圾。
+      if (assistantCount <= baselineAssistantCount) {
         stableTicks = 0;
         lastText = text;
         continue;
@@ -519,6 +698,9 @@
     const nodes = collectAssistantRoots();
     const last =
       nodes.length > 0 ? /** @type {HTMLElement} */ (nodes[nodes.length - 1]) : root;
+    if (countAssistantMessages() <= baselineAssistantCount) {
+      throw new Error("等待模型回复超时：未出现新的助手回复");
+    }
     scrollAssistantIntoView(last);
     await sleep(250);
     const text = extractAssistantMessageText(last) || (last.innerText || "").trim();
@@ -553,38 +735,58 @@
         role: editor.getAttribute("role"),
       });
 
-      const baselineAssistantCount = document.querySelectorAll(
-        '[data-message-author-role="assistant"]'
-      ).length;
+      const baselineAssistantCount = countAssistantMessages();
 
       await setPromptText(editor, opts.question);
       await sleep(250);
 
-      let send = findSendButton();
-      if (!send) {
-        try {
-          send = await waitFor(() => findSendButton(), 12000, 200);
-        } catch (_) {
-          send = null;
+      /** 提交是否已生效：生成已开始，或输入框已被清空。 */
+      const committed = () =>
+        Promise.resolve(isGenerating() || getPromptText(editor).length === 0);
+
+      const trySubmit = async (attempt) => {
+        let send = findSendButton();
+        if (!send || isDisabled(send)) {
+          try {
+            send = await waitFor(
+              () => {
+                const b = findSendButton();
+                return b && !isDisabled(b) ? b : null;
+              },
+              20000,
+              200
+            );
+          } catch (_) {
+            send = findSendButton();
+          }
         }
+        if (send && !isDisabled(send)) {
+          trace("info", "点击发送", {
+            testid: send.getAttribute("data-testid"),
+            aria: send.getAttribute("aria-label"),
+            attempt,
+          });
+          send.click();
+        } else {
+          trace("warn", "发送按钮不可用，改用 Enter", {
+            found: Boolean(send),
+            disabled: send ? isDisabled(send) : null,
+            attempt,
+          });
+          pressEnter(editor);
+        }
+        return waitUntil(committed, 15000, 250).then(() => true).catch(() => false);
+      };
+
+      let submitted = await trySubmit(1);
+      if (!submitted) {
+        trace("warn", "消息未提交，重试一次");
+        submitted = await trySubmit(2);
       }
-      if (send) {
-        trace("info", "点击发送", {
-          testid: send.getAttribute("data-testid"),
-          aria: send.getAttribute("aria-label"),
-        });
-        send.click();
-      } else {
-        trace("warn", "未找到发送按钮，尝试 Enter");
-        editor.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Enter",
-            code: "Enter",
-            bubbles: true,
-            cancelable: true,
-          })
-        );
+      if (!submitted) {
+        throw new Error("消息未发送成功：输入框未清空且未进入生成状态");
       }
+      trace("info", "消息已提交", { generating: isGenerating() });
 
       trace("info", "等待模型回复结束");
       if (opts.submitOnly) {
