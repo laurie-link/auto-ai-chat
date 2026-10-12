@@ -230,6 +230,50 @@ function persistDifySettings() {
   });
 }
 
+/** @returns {string} */
+function targetBrandsValue() {
+  const el = $("difyTargetBrands");
+  return el instanceof HTMLInputElement ? String(el.value || "").trim() : "";
+}
+
+/** 「自动上传 Dify」开启却未填 target_brands 时，后台会跳过 Dify 并下回 LLM 列为空的占位表格。
+ * @returns {string|null} 拦截原因；null 表示可以运行
+ */
+function difyConfigBlockReason() {
+  const enabledEl = $("difyWorkflowEnabled");
+  if (enabledEl instanceof HTMLInputElement && !enabledEl.checked) return null;
+  if (targetBrandsValue()) return null;
+  return "未填写 target_brands（目标品牌）：Dify 会跳过分析，只下回 LLM 列为空的占位表格。请先填上要统计的品牌再运行。";
+}
+
+/** 运行前校验；不通过时提示、聚焦缺失字段并拒绝启动。
+ * @returns {boolean}
+ */
+function ensureDifyReady() {
+  const reason = difyConfigBlockReason();
+  if (!reason) return true;
+  setStatus(reason, true);
+  popupTrace("运行被拒绝：target_brands 为空");
+  focusTargetBrandsInput();
+  return false;
+}
+
+/** 补跑 Dify 与是否勾选「自动上传」无关，target_brands 必须非空。
+ * @returns {boolean}
+ */
+function ensureTargetBrands() {
+  if (targetBrandsValue()) return true;
+  setStatus("未填写 target_brands（目标品牌），无法补跑 Dify。请先填上要统计的品牌。", true);
+  popupTrace("补跑被拒绝：target_brands 为空");
+  focusTargetBrandsInput();
+  return false;
+}
+
+function focusTargetBrandsInput() {
+  const brandsEl = $("difyTargetBrands");
+  if (brandsEl instanceof HTMLInputElement) brandsEl.focus();
+}
+
 function popupTrace(message, detail) {
   const payload = {
     type: "DEBUG_LOG",
@@ -313,6 +357,8 @@ async function runMultiSelected() {
     return;
   }
 
+  if (!ensureDifyReady()) return;
+
   setRunButtonsDisabled(true);
   updateJobUi(true);
   setStatus("已提交多平台任务…");
@@ -392,6 +438,8 @@ async function runQueue(runtimeType, runningMsg, okLabel) {
     return;
   }
 
+  if (!ensureDifyReady()) return;
+
   setRunButtonsDisabled(true);
   updateJobUi(true);
   setStatus("已提交，正在启动后台任务…");
@@ -470,9 +518,8 @@ async function runQueue(runtimeType, runningMsg, okLabel) {
  */
 async function runDifySupplementJob(extra = {}) {
   persistDifySettings();
-  const brandsEl = $("difyTargetBrands");
-  const targetBrands =
-    brandsEl instanceof HTMLInputElement ? String(brandsEl.value || "").trim() : "";
+  if (!ensureTargetBrands()) return;
+  const targetBrands = targetBrandsValue();
 
   setRunButtonsDisabled(true);
   updateJobUi(true);
@@ -503,6 +550,8 @@ async function runDifySupplementJob(extra = {}) {
 }
 
 $("uploadStubCsv")?.addEventListener("click", () => {
+  persistDifySettings();
+  if (!ensureTargetBrands()) return;
   $("stubCsvFile")?.click();
 });
 

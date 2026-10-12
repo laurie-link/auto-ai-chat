@@ -1976,6 +1976,7 @@ async function runDifyStubCsvJob(csvText, targetBrands) {
   difyJsonJobBusy = true;
   difyAbortRequested = false;
 
+  let doneMessage = "Dify 补跑失败 · 已下载占位 CSV";
   try {
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
     await updateRunProgress({ status: "running", message: "正在解析占位 CSV 并补跑 Dify…" });
@@ -1993,6 +1994,7 @@ async function runDifyStubCsvJob(csvText, targetBrands) {
       parsed = parseBrandReportCsvToResults(csvText);
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
+      doneMessage = err;
       await chrome.storage.local.set({
         lastDifyRun: { ok: false, at: new Date().toISOString(), error: err },
       });
@@ -2002,13 +2004,23 @@ async function runDifyStubCsvJob(csvText, targetBrands) {
     const payload = buildWorkflowExportJson(parsed.results, parsed.site);
     payload.source = "ai-autochat-stub-csv-import";
 
-    return await runDifyWorkflowWithPayload(
+    const result = await runDifyWorkflowWithPayload(
       cfg,
       payload,
       brands,
       `ai-autochat-${parsed.site}-stub-retry`
     );
+    if (result.ok) {
+      doneMessage = result.cancelled
+        ? "Dify 已停止 · 已下载占位 CSV"
+        : "Dify 补跑完成 · CSV 已下载";
+    } else {
+      doneMessage = String(result.error || doneMessage);
+    }
+    return result;
   } finally {
+    // 补跑不经过多平台队列，进度状态必须在这里收尾，否则界面会一直停在「运行中」
+    await updateRunProgress({ status: "done", message: doneMessage });
     difyJsonJobBusy = false;
     try {
       await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
