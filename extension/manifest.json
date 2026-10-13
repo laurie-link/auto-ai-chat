@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "AI AutoChat — Brand Visibility",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "按预设问题访问各 AI 站点，采集回复与引用并保存到本地（Gemini、ChatGPT、Perplexity、Google AI Overview / AI Mode 等）。",
-  "permissions": ["storage", "tabs", "downloads", "scripting", "webNavigation", "sidePanel"],
+  "permissions": ["storage", "tabs", "downloads", "scripting", "webNavigation", "sidePanel", "alarms"],
   "host_permissions": [
     "https://dify.aiexplorerxj.top/*",
     "https://gemini.google.com/*",

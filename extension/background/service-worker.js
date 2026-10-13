@@ -96,12 +96,14 @@ function beginCollectionJob() {
   collectionAbortRequested = false;
   difyAbortRequested = false;
   collectionInProgress = true;
+  startJobKeepalive();
 }
 
 function endCollectionJob() {
   collectionInProgress = false;
   collectionAbortRequested = false;
   void releaseCollectionTab();
+  if (!difyJsonJobBusy) stopJobKeepalive();
 }
 
 /**
@@ -383,6 +385,7 @@ async function finalizeJobStop(message) {
   difyAbortRequested = false;
   collectionInProgress = false;
   difyJsonJobBusy = false;
+  stopJobKeepalive();
   try {
     await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
   } catch {
@@ -390,6 +393,175 @@ async function finalizeJobStop(message) {
   }
   if (message) {
     await updateRunProgress({ status: "done", message });
+  }
+}
+
+/* ---------- Dify 任务保活与崩溃恢复 ---------- */
+
+const DIFY_RESUME_ALARM = "autochat-dify-resume";
+const DIFY_PENDING_KEY = "difyPendingJob";
+const DIFY_HEARTBEAT_KEY = "difyJobHeartbeat";
+/** 裸 fetch 不算「扩展在忙」：每 20 秒调一次扩展 API，顶掉 MV3 的 30 秒空闲回收计时器 */
+const JOB_KEEPALIVE_MS = 20000;
+const DIFY_RESUME_MAX_ATTEMPTS = 3;
+const DIFY_RESUME_MAX_AGE_MS = 30 * 60 * 1000;
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let jobKeepaliveTimer = null;
+
+function startJobKeepalive() {
+  if (jobKeepaliveTimer) return;
+  const tick = () => {
+    void chrome.storage.local.set({ [DIFY_HEARTBEAT_KEY]: Date.now() }).catch(() => {});
+  };
+  tick();
+  jobKeepaliveTimer = setInterval(tick, JOB_KEEPALIVE_MS);
+}
+
+function stopJobKeepalive() {
+  if (!jobKeepaliveTimer) return;
+  clearInterval(jobKeepaliveTimer);
+  jobKeepaliveTimer = null;
+}
+
+/**
+ * Dify 调用前把待办写进 storage：worker 被回收后靠它重跑，
+ * 否则用户只会拿到中间分析列为空的占位 CSV。
+ * @param {{ site?: string, payload: object, targetBrands: string, uploadBaseName: string }} job
+ */
+async function persistDifyPendingJob(job) {
+  startJobKeepalive();
+  try {
+    // 自动重跑会再次走到这里：沿用原任务的起始时间与次数，否则次数上限永远不生效
+    const prev = await chrome.storage.local.get([DIFY_PENDING_KEY]);
+    const prevJob = prev[DIFY_PENDING_KEY];
+    const carried = prevJob && typeof prevJob === "object" ? prevJob : null;
+    await chrome.storage.local.set({
+      [DIFY_PENDING_KEY]: {
+        site: String(job.site || ""),
+        payload: job.payload,
+        targetBrands: String(job.targetBrands || ""),
+        uploadBaseName: String(job.uploadBaseName || "ai-autochat-resume"),
+        startedAt: String(carried?.startedAt || new Date().toISOString()),
+        attempts: Number(carried?.attempts) || 0,
+      },
+      [DIFY_HEARTBEAT_KEY]: Date.now(),
+      difyWorkflowRunInProgress: true,
+    });
+    // 每分钟唤醒 worker 检查待办：worker 被杀也能把结果救回来
+    chrome.alarms.create(DIFY_RESUME_ALARM, { periodInMinutes: 1, delayInMinutes: 1 });
+  } catch (e) {
+    await trace("warn", "background", "Dify 待办写入失败（崩溃后无法自动重跑）", String(e));
+  }
+}
+
+async function clearDifyPendingJob() {
+  try {
+    chrome.alarms.clear(DIFY_RESUME_ALARM);
+  } catch {
+    /* ignore */
+  }
+  try {
+    await chrome.storage.local.remove([DIFY_PENDING_KEY]);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @param {unknown} job */
+function isDifyPendingJobResumable(job, now = Date.now()) {
+  if (!job || typeof job !== "object") return false;
+  const startedAt = Date.parse(String(/** @type {Record<string, unknown>} */ (job).startedAt || ""));
+  if (!Number.isFinite(startedAt) || now - startedAt > DIFY_RESUME_MAX_AGE_MS) return false;
+  return (Number(/** @type {Record<string, unknown>} */ (job).attempts) || 0) < DIFY_RESUME_MAX_ATTEMPTS;
+}
+
+/**
+ * worker 重启 / alarm 唤醒后：有待办就重跑 Dify。
+ * 新 worker 实例存在即说明上一个已被回收，所以这里不必再判断心跳。
+ */
+async function resumePendingDifyJobIfNeeded() {
+  let data;
+  try {
+    data = await chrome.storage.local.get([DIFY_PENDING_KEY, DIFY_HEARTBEAT_KEY]);
+  } catch {
+    return;
+  }
+  const job = data[DIFY_PENDING_KEY];
+  if (!job || typeof job !== "object") {
+    await clearDifyPendingJob();
+    return;
+  }
+  // 本实例正在采集/跑 Dify 时不动它；待办只可能来自已经死掉的 worker
+  if (collectionInProgress || difyJsonJobBusy) return;
+  const heartbeat = Number(data[DIFY_HEARTBEAT_KEY]) || 0;
+
+  if (!isDifyPendingJobResumable(job)) {
+    await trace("warn", "background", "Dify 自动重跑已放弃", {
+      attempts: Number(job.attempts) || 0,
+      startedAt: String(job.startedAt || ""),
+    });
+    await clearDifyPendingJob();
+    await downloadStubCsvIfPossible(job.payload);
+    await updateRunProgress({
+      status: "done",
+      message: "上次 Dify 分析未完成 · 已下载采集 CSV（分析列为空）· 可上传补跑",
+    });
+    return;
+  }
+
+  const attempts = (Number(job.attempts) || 0) + 1;
+  difyJsonJobBusy = true;
+  difyAbortRequested = false;
+  try {
+    startJobKeepalive();
+    await chrome.storage.local.set({
+      [DIFY_PENDING_KEY]: { ...job, attempts },
+      [DIFY_HEARTBEAT_KEY]: Date.now(),
+      difyWorkflowRunInProgress: true,
+    });
+    await trace("info", "background", `Dify 自动重跑（第 ${attempts} 次，上次结果丢失）`, {
+      site: String(job.site || ""),
+      rows: Array.isArray(job.payload?.results) ? job.payload.results.length : 0,
+      workerDiedMsAgo: heartbeat ? Date.now() - heartbeat : null,
+    });
+    await updateRunProgress({ status: "running", message: "Dify 结果丢失，正在自动重跑…" });
+
+    const cfg = await chrome.storage.local.get([
+      "difyBaseUrl",
+      "difyApiKey",
+      "difyApiUser",
+      "difyTargetBrands",
+    ]);
+    const targetBrands = String(job.targetBrands || cfg.difyTargetBrands || "").trim();
+    const result = await runDifyWorkflowWithPayload(
+      cfg,
+      job.payload,
+      targetBrands,
+      String(job.uploadBaseName || "ai-autochat-resume")
+    );
+    const last = await chrome.storage.local.get(["lastDifyRun"]);
+    if (result.ok) {
+      await updateRunProgress({
+        status: "done",
+        message: String(last.lastDifyRun?.message || "Dify 完成 · CSV 已下载"),
+      });
+    } else if (!result.cancelled) {
+      await updateRunProgress({
+        status: "done",
+        message: String(result.error || "Dify 失败 · 已下载占位 CSV"),
+      });
+    }
+  } catch (e) {
+    await trace("error", "background", "Dify 自动重跑异常", String(e?.message || e));
+  } finally {
+    difyJsonJobBusy = false;
+    try {
+      await chrome.storage.local.set({ difyWorkflowRunInProgress: false });
+    } catch {
+      /* ignore */
+    }
+    stopJobKeepalive();
   }
 }
 
@@ -401,6 +573,7 @@ async function reconcileStaleJobStateOnStartup() {
       "difyWorkflowRunInProgress",
       "lastRun",
       "lastDifyRun",
+      DIFY_PENDING_KEY,
     ]);
     const stale =
       data.runProgress?.status === "running" || Boolean(data.difyWorkflowRunInProgress);
@@ -409,11 +582,13 @@ async function reconcileStaleJobStateOnStartup() {
     const lastRun = data.lastRun;
     const lastDify = data.lastDifyRun;
     const runProgress = data.runProgress;
+    const hasPendingDifyJob = Boolean(data[DIFY_PENDING_KEY] && typeof data[DIFY_PENDING_KEY] === "object");
     const hasResults = Array.isArray(lastRun?.results) && lastRun.results.length > 0;
     const n = hasResults ? lastRun.results.length : 0;
     const total = lastRun?.total ?? runProgress?.total ?? n;
     const interruptedCollection =
-      Boolean(lastRun?.inProgress) || runProgress?.status === "running";
+      Boolean(lastRun?.inProgress) ||
+      (runProgress?.status === "running" && !hasPendingDifyJob);
 
     const runAt = String(lastRun?.completedAt || "");
     const difyAt = String(lastDify?.at || "");
@@ -424,7 +599,9 @@ async function reconcileStaleJobStateOnStartup() {
 
     const needsProgressCsv = interruptedCollection && hasResults;
 
-    if (needsProgressCsv || needsDifyStub) {
+    // 有待办任务时不下占位表：交给 resumePendingDifyJobIfNeeded 重跑 Dify，
+    // 否则用户拿到的中间分析列永远是空的（这正是「分析列为空」事故的成因）
+    if (!hasPendingDifyJob && (needsProgressCsv || needsDifyStub)) {
       await downloadStubCsvIfPossible(
         buildWorkflowExportJson(lastRun.results, String(lastRun.site || "unknown"))
       );
@@ -436,7 +613,9 @@ async function reconcileStaleJobStateOnStartup() {
     }
 
     let message;
-    if (needsProgressCsv) {
+    if (hasPendingDifyJob) {
+      message = "上次 Dify 分析未收到结果（扩展已重载）· 正在自动重跑…";
+    } else if (needsProgressCsv) {
       message = `上次采集中断（扩展已重载）· 已完成 ${n}/${total} 题 · 已下载进度 CSV`;
     } else if (needsDifyStub) {
       message = "上次 Dify 未完成 · 已下载采集占位 CSV，可上传补跑";
@@ -479,12 +658,20 @@ async function stopCurrentJob() {
   }
 
   const data = await chrome.storage.local.get(["difyWorkflowRunInProgress", "runProgress", "lastRun"]);
-  if (difyJsonJobBusy || data.difyWorkflowRunInProgress) {
+  if (difyJsonJobBusy) {
     difyAbortRequested = true;
     return { ok: true, message: "正在停止 Dify…" };
   }
 
+  if (data.difyWorkflowRunInProgress) {
+    // 本实例没有在跑的 Dify 任务：是 worker 被回收留下的标记，连同待办一起清掉（用户已明确要停）
+    await clearDifyPendingJob();
+    await finalizeJobStop("已停止（已清理陈旧任务状态）");
+    return { ok: true, message: "已清理陈旧任务状态" };
+  }
+
   if (data.runProgress?.status === "running") {
+    await clearDifyPendingJob();
     if (Array.isArray(data.lastRun?.results) && data.lastRun.results.length > 0) {
       await downloadStubCsvIfPossible(
         buildWorkflowExportJson(
@@ -510,8 +697,16 @@ chrome.runtime.onInstalled.addListener(() => {
   void initSidePanel();
   void migrateBundledDifyApiKey();
 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name !== DIFY_RESUME_ALARM) return;
+  void resumePendingDifyJobIfNeeded();
+});
+
 void migrateBundledDifyApiKey();
-void reconcileStaleJobStateOnStartup();
+// 冷启动：先清理陈旧状态，再看有没有没跑完的 Dify 待办要救回来
+void reconcileStaleJobStateOnStartup()
+  .then(() => resumePendingDifyJobIfNeeded())
+  .catch(() => {});
 
 /**
  * Dify 失败时下载与成功时同表头的占位 CSV（LLM 列为空）。
@@ -1822,6 +2017,12 @@ async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uplo
   }
 
   try {
+    await persistDifyPendingJob({
+      site: String(payloadObject?.site || ""),
+      payload: payloadObject,
+      targetBrands: brands,
+      uploadBaseName,
+    });
     const resultCount = Array.isArray(payloadObject?.results) ? payloadObject.results.length : 0;
     await trace("info", "background", "Dify：上传 JSON 并执行工作流", {
       apiBase,
@@ -1886,6 +2087,10 @@ async function runDifyWorkflowWithPayload(cfg, payloadObject, targetBrands, uplo
     });
     await downloadStubCsvIfPossible(payloadObject);
     return { ok: false, error: msg };
+  } finally {
+    // 结果已落盘（成功下载或已下载占位表），待办和保活都撤掉
+    await clearDifyPendingJob();
+    if (!collectionInProgress) stopJobKeepalive();
   }
 }
 
@@ -1905,6 +2110,7 @@ async function runDifyJsonJob(msg) {
   difyAbortRequested = false;
 
   try {
+    await clearDifyPendingJob();
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
 
     const cfg = await chrome.storage.local.get([
@@ -1978,6 +2184,7 @@ async function runDifyStubCsvJob(csvText, targetBrands) {
 
   let doneMessage = "Dify 补跑失败 · 已下载占位 CSV";
   try {
+    await clearDifyPendingJob();
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
     await updateRunProgress({ status: "running", message: "正在解析占位 CSV 并补跑 Dify…" });
 
@@ -2059,6 +2266,8 @@ async function maybeAnalyzeWithDify(results, site) {
   const payload = buildWorkflowExportJson(results, site);
   difyAbortRequested = false;
   try {
+    // 新任务开始：清掉上一次遗留的待办，避免沿用旧的次数上限
+    await clearDifyPendingJob();
     await chrome.storage.local.set({ difyWorkflowRunInProgress: true });
     await updateRunProgress({
       status: "running",
