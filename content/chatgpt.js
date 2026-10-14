@@ -134,6 +134,8 @@
       const el = document.querySelector(`[data-testid="${id}"]`);
       if (el instanceof HTMLElement && isVisible(el)) return el;
     }
+    const named = findNewChatButtonByName();
+    if (named) return named;
     const navButtons = document.querySelectorAll(
       '#app-shell-sidebar [data-appearance="plain"] button, [data-appearance="plain"] button'
     );
@@ -145,6 +147,27 @@
       "aside [role=\"navigation\"] ul > li:first-child a[href=\"/\"], aside nav ul > li:first-child a[href=\"/\"]"
     );
     if (sidebarFirst instanceof HTMLElement && isVisible(sidebarFirst)) return sidebarFirst;
+    return null;
+  }
+
+  /**
+   * 2026 版 UI 已去掉上面那些 data-testid；窗口变窄（约 <768px）时侧栏整块收起，
+   * 「新聊天」改在页头以一个只有无障碍名字的图标存在 —— `[data-appearance="plain"]`
+   * 那批按钮此时全部藏在 0 宽的侧栏里，一个都不可见，旧逻辑于是找不到按钮。
+   */
+  const NEW_CHAT_LABELS = ["New chat", "新聊天", "新对话", "新会话"];
+
+  function findNewChatButtonByName() {
+    for (const el of document.querySelectorAll("button, a")) {
+      if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+      const aria = (el.getAttribute("aria-label") || "").trim();
+      if (aria) {
+        if (NEW_CHAT_LABELS.includes(aria)) return el;
+        continue;
+      }
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (NEW_CHAT_LABELS.includes(text)) return el;
+    }
     return null;
   }
 
